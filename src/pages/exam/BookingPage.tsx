@@ -2,6 +2,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useEffect, useMemo, useState, useRef } from "react";
 import { api, getSession, getBackendUrl } from "@/lib/api";
 import { supabase } from "@/integrations/supabase/client";
+import { extractTestCenterId } from "@/lib/test-centers";
 import {
   pickArray, normalizeOccupation, normalizeDateValue,
   normalizeAvailableDateEntries, getSessionId, getSessionSiteId, getSessionSiteCity,
@@ -666,7 +667,7 @@ export default function BookingPage() {
           <div><span>City:</span> <strong>{siteCity || selectedCity || "-"}</strong></div>
           <div><span>Site ID:</span> <strong>{siteId || "-"}</strong></div>
           <div><span>Test Center ID:</span> <strong>{
-            (selectedSession?.test_center?.id || selectedSession?.test_center?.test_center_id || selectedSession?.test_center_id || sessionDetail?.test_center?.id || sessionDetail?.test_center?.test_center_id || sessionDetail?.test_center_id || siteId) || "-"
+            extractTestCenterId(selectedSession) || extractTestCenterId(sessionDetail) || siteId || "-"
           }</strong></div>
           <div><span>Test Center:</span> <strong>{centerOptions.find((c) => String(c.siteId) === String(selectedCenterId))?.name || "-"}</strong></div>
           <div><span>Exam Session ID:</span> <strong>{sessionDetail?.id ? `#${sessionDetail.id}` : (sessionId ? `#${sessionId}` : "-")}</strong></div>
