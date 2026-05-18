@@ -1,0 +1,41 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  login     String   @unique
+  svpUserId Int?
+  email     String?
+  fullName  String?
+  phone     String?
+  passwordHash String?
+  role      String   @default("USER")
+  isApproved Boolean @default(false)
+  approvedAt DateTime?
+  createdAt DateTime @default(now())
+
+  sessions  Session[]
+}
+
+model Session {
+  id               String   @id @default(cuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id])
+
+  refreshTokenHash String
+  refreshExpiresAt DateTime
+  revokedAt        DateTime?
+
+  // Encrypted SVP access token for server-to-server calls
+  svpAccessEnc     String?
+  svpAccessExp     DateTime?
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
