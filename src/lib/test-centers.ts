@@ -30,12 +30,23 @@ export const TestCentersApi = {
     api(`${BASE}/${id}/status`, { method: "PUT", body: data }),
 };
 
+// Pull the canonical test_center_id from any SVP node (session, reservation,
+// or test_center payload). Prefers `test_center_id` (canonical FK) over the
+// row's internal `id`, then falls back through nested shapes.
 export function extractTestCenterId(node: any): string {
   if (!node) return "";
-  const tc = node.test_center || node;
-  return String(
-    tc?.id || tc?.test_center_id || node?.test_center_id || ""
-  );
+  const tc = node.test_center || {};
+  const candidates = [
+    node?.test_center_id,
+    tc?.test_center_id,
+    tc?.id,
+    node?.site?.test_center_id,
+    node?.site?.id,
+  ];
+  for (const v of candidates) {
+    if (v !== undefined && v !== null && v !== "") return String(v);
+  }
+  return "";
 }
 
 export default TestCentersApi;
