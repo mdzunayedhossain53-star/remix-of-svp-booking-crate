@@ -66,7 +66,15 @@ export function getSessionId(item: any): string {
 }
 
 export function getSessionSiteId(item: any): string {
-  return String(item?.site_id || item?.test_center?.site_id || item?.test_center?.id || item?.site?.id || "");
+  return String(
+    item?.site_id ||
+    item?.test_center?.site_id ||
+    item?.test_center?.id ||
+    item?.test_center?.test_center_id ||
+    item?.test_center_id ||
+    item?.site?.id ||
+    ""
+  );
 }
 
 export function getSessionSiteCity(item: any): string {
