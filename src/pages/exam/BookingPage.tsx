@@ -666,7 +666,8 @@ export default function BookingPage() {
           <div><span>City:</span> <strong>{siteCity || selectedCity || "-"}</strong></div>
           <div><span>Site ID:</span> <strong>{siteId || "-"}</strong></div>
           <div><span>Test Center:</span> <strong>{centerOptions.find((c) => String(c.siteId) === String(selectedCenterId))?.name || "-"}</strong></div>
-          <div><span>Exam Session ID:</span> <strong>{sessionId || "-"}</strong></div>
+          <div><span>Exam Session ID:</span> <strong>{sessionDetail?.id ? `#${sessionDetail.id}` : (sessionId ? `#${sessionId}` : "-")}</strong></div>
+          <div><span>Session Status:</span> <strong>{loadingSeats ? "Loading..." : (sessionDetail?.status || "-")}</strong></div>
           <div><span>Hold ID:</span> <strong>{holdId || "-"}</strong></div>
           <div><span>Booking No:</span> <strong>{reservationId || "-"}</strong></div>
         </div>
