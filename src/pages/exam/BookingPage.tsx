@@ -243,6 +243,51 @@ export default function BookingPage() {
     return () => { active = false; };
   }, [selectedCity, availableDate, categoryId]);
 
+  // Admin-defined exam_session_id -> site_id mapping (deterministic).
+  // Loaded from Lovable Cloud whenever sessions change. Also fetches the
+  // matching test_centers row so we have the canonical center NAME for each
+  // admin-mapped site_id (stored under `site:<siteId>` in testCenterMap).
+  useEffect(() => {
+    if (!sessions.length) return;
+    let active = true;
+    (async () => {
+      const ids = Array.from(new Set(sessions.map((s: any) => Number(getSessionId(s))).filter((n) => Number.isFinite(n) && n > 0)));
+      if (!ids.length) return;
+      const { data: maps } = await supabase
+        .from("exam_session_centers")
+        .select("exam_session_id, site_id")
+        .in("exam_session_id", ids);
+      if (!active || !maps?.length) return;
+      const newSessionMap = new Map(sessionIdToSiteId);
+      let sessionMapChanged = false;
+      maps.forEach((row: any) => {
+        const k = String(row.exam_session_id);
+        const v = String(row.site_id);
+        if (newSessionMap.get(k) !== v) { newSessionMap.set(k, v); sessionMapChanged = true; }
+      });
+      const siteIds = Array.from(new Set(maps.map((r: any) => Number(r.site_id))));
+      const { data: centers } = await supabase
+        .from("test_centers")
+        .select("site_id, name")
+        .in("site_id", siteIds);
+      if (!active) return;
+      const newTcMap = new Map(testCenterMap);
+      const newNameMap = new Map(centerNameToSiteId);
+      let tcChanged = false;
+      let nameChanged = false;
+      centers?.forEach((row: any) => {
+        const siteKey = `site:${row.site_id}`;
+        if (newTcMap.get(siteKey) !== row.name) { newTcMap.set(siteKey, row.name); tcChanged = true; }
+        const nk = String(row.name || "").trim().toLowerCase();
+        if (nk && newNameMap.get(nk) !== String(row.site_id)) { newNameMap.set(nk, String(row.site_id)); nameChanged = true; }
+      });
+      if (sessionMapChanged) setSessionIdToSiteId(newSessionMap);
+      if (tcChanged) setTestCenterMap(newTcMap);
+      if (nameChanged) setCenterNameToSiteId(newNameMap);
+    })();
+    return () => { active = false; };
+  }, [sessions]);
+
   // Resolve real test center names: prefer SVP exam_session detail (test_center.name),
   // fall back to local DB by site_id. Key map by the same key buildCenterOptions uses.
   useEffect(() => {
