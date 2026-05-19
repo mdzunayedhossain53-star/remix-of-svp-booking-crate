@@ -98,20 +98,26 @@ export function getExplicitSessionCenterName(item: any): string {
 
 /**
  * Resolves the test center name and site_id for a session, stamping them onto the session.
- * - `testCenterMap` is keyed by `session:<sessionId>` (name from /exam-sessions/:id detail fetch)
- *   or by site_id (name from local DB lookup).
- * - `centerNameToSiteId` maps lowercased center name -> site_id (from local DB lookup).
- * When SVP returns `site_id: null`, this fills it in from the name->site_id map.
+ * Site_id priority:
+ *   1. `sessionIdToSiteId` admin mapping (exam_session_id -> site_id) — deterministic
+ *   2. Existing `site_id` already on the session
+ *   3. Name-based lookup via `centerNameToSiteId`
+ * Name priority: admin-mapped DB name (testCenterMap.get(`site:<id>`)) > explicit SVP name > session-detail name.
  */
 export function resolveSessionCenter(
   item: any,
   testCenterMap: Map<string, string>,
-  centerNameToSiteId: Map<string, string>
+  centerNameToSiteId: Map<string, string>,
+  sessionIdToSiteId?: Map<string, string>
 ): any {
+  const sessionId = getSessionId(item);
+  const adminSiteId = sessionIdToSiteId?.get(String(sessionId)) || "";
   const explicit = getExplicitSessionCenterName(item);
-  const mappedName = testCenterMap.get(`session:${getSessionId(item)}`);
-  const resolvedName = explicit || mappedName || "";
+  const mappedName = testCenterMap.get(`session:${sessionId}`);
+  const adminName = adminSiteId ? testCenterMap.get(`site:${adminSiteId}`) : "";
+  const resolvedName = adminName || explicit || mappedName || "";
   const resolvedSiteId =
+    adminSiteId ||
     getSessionSiteId(item) ||
     (resolvedName ? centerNameToSiteId.get(resolvedName.trim().toLowerCase()) : "") ||
     "";
