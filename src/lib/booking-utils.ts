@@ -96,28 +96,81 @@ export function getExplicitSessionCenterName(item: any): string {
   return String(item?.test_center_name || item?.test_center?.name || item?.test_center?.test_center_name || "").trim();
 }
 
+export function getSessionSection(item: any): string {
+  return String(
+    item?.section ||
+    item?.section_name ||
+    item?.section_code ||
+    item?.exam_section ||
+    item?.session?.section ||
+    ""
+  ).trim();
+}
+
+export function getSessionCategoryId(item: any): string {
+  return String(
+    item?.category_id ||
+    item?.category?.id ||
+    item?.occupation?.category_id ||
+    item?.occupation?.category?.id ||
+    ""
+  ).trim();
+}
+
+export interface SectionCenterRule {
+  id: string;
+  city: string | null;
+  category_id: string | null;
+  section: string | null;
+  site_id: number;
+  priority: number;
+}
+
+/** Picks the highest-priority, most-specific rule that matches the session. */
+export function findMatchingSectionRule(item: any, rules: SectionCenterRule[]): SectionCenterRule | null {
+  if (!rules?.length) return null;
+  const sCity = getSessionSiteCity(item).trim().toLowerCase();
+  const sCat = getSessionCategoryId(item).toLowerCase();
+  const sSection = getSessionSection(item).toLowerCase();
+  const matches = rules.filter((r) => {
+    if (r.city && r.city.trim().toLowerCase() !== sCity) return false;
+    if (r.category_id && r.category_id.trim().toLowerCase() !== sCat) return false;
+    if (r.section && r.section.trim().toLowerCase() !== sSection) return false;
+    return r.city || r.category_id || r.section;
+  });
+  if (!matches.length) return null;
+  const specificity = (r: SectionCenterRule) => (r.city ? 1 : 0) + (r.category_id ? 1 : 0) + (r.section ? 1 : 0);
+  matches.sort((a, b) => (b.priority - a.priority) || (specificity(b) - specificity(a)));
+  return matches[0];
+}
+
 /**
  * Resolves the test center name and site_id for a session, stamping them onto the session.
  * Site_id priority:
- *   1. `sessionIdToSiteId` admin mapping (exam_session_id -> site_id) — deterministic
- *   2. Existing `site_id` already on the session
- *   3. Name-based lookup via `centerNameToSiteId`
- * Name priority: admin-mapped DB name (testCenterMap.get(`site:<id>`)) > explicit SVP name > session-detail name.
+ *   1. `sessionIdToSiteId` admin exact mapping (exam_session_id -> site_id)
+ *   2. Section rule (city + category + section)
+ *   3. Existing `site_id` already on the session (from SVP)
+ *   4. Name-based lookup via `centerNameToSiteId`
  */
 export function resolveSessionCenter(
   item: any,
   testCenterMap: Map<string, string>,
   centerNameToSiteId: Map<string, string>,
-  sessionIdToSiteId?: Map<string, string>
+  sessionIdToSiteId?: Map<string, string>,
+  sectionRules?: SectionCenterRule[]
 ): any {
   const sessionId = getSessionId(item);
   const adminSiteId = sessionIdToSiteId?.get(String(sessionId)) || "";
+  const ruleMatch = !adminSiteId && sectionRules?.length ? findMatchingSectionRule(item, sectionRules) : null;
+  const ruleSiteId = ruleMatch ? String(ruleMatch.site_id) : "";
   const explicit = getExplicitSessionCenterName(item);
   const mappedName = testCenterMap.get(`session:${sessionId}`);
   const adminName = adminSiteId ? testCenterMap.get(`site:${adminSiteId}`) : "";
-  const resolvedName = adminName || explicit || mappedName || "";
+  const ruleName = ruleSiteId ? testCenterMap.get(`site:${ruleSiteId}`) : "";
+  const resolvedName = adminName || ruleName || explicit || mappedName || "";
   const resolvedSiteId =
     adminSiteId ||
+    ruleSiteId ||
     getSessionSiteId(item) ||
     (resolvedName ? centerNameToSiteId.get(resolvedName.trim().toLowerCase()) : "") ||
     "";
