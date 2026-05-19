@@ -285,6 +285,34 @@ export default function BookingPage() {
         });
       }
 
+      // 3. Final fallback: query local DB by city for sessions that have no usable
+      //    site_id / test_center_id (SVP often returns site_id=null). All sessions
+      //    sharing the same city resolve to the city's canonical test center name.
+      const cityMissing = Array.from(new Set(
+        sessions
+          .filter((s: any) => {
+            const key = String(getCenterKey(s));
+            return key && !newMap.has(key) && key.startsWith("city:");
+          })
+          .map((s: any) => String(getSessionSiteCity(s)).trim())
+          .filter(Boolean)
+      ));
+      if (cityMissing.length) {
+        const { data } = await supabase.from("test_centers").select("name, city").in("city", cityMissing);
+        const byCity = new Map<string, string>();
+        data?.forEach((row: any) => {
+          const c = String(row.city || "").trim().toLowerCase();
+          if (c && !byCity.has(c)) byCity.set(c, row.name);
+        });
+        sessions.forEach((s: any) => {
+          const key = String(getCenterKey(s));
+          if (!key || newMap.has(key) || !key.startsWith("city:")) return;
+          const c = String(getSessionSiteCity(s)).trim().toLowerCase();
+          const name = byCity.get(c);
+          if (name) { newMap.set(key, name); changed = true; }
+        });
+      }
+
       if (active && changed) setTestCenterMap(newMap);
     })();
     return () => { active = false; };
