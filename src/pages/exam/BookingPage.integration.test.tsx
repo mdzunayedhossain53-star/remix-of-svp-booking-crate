@@ -107,7 +107,7 @@ describe("BookingPage integration: sessionsWithResolvedCenters → UI", () => {
     render(
       <MemoryRouter
         initialEntries={[
-          "/booking?occupationId=555&categoryId=42&siteCity=Bogura&examDate=2026-06-15&languageCode=en",
+          "/booking?occupationId=555&siteCity=Bogura&examDate=2026-06-15&languageCode=en",
         ]}
       >
         <BookingPage />
