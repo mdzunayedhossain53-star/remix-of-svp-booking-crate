@@ -56,6 +56,14 @@ export default function AccessDashboardPage() {
               Create Agency
             </Link>
           )}
+          {isAdmin && (
+            <Link
+              className={`nav-item ${location.pathname === "/access/session-centers" ? "nav-item--active" : ""}`}
+              to="/access/session-centers"
+            >
+              Session Centers
+            </Link>
+          )}
         </nav>
       </aside>
 

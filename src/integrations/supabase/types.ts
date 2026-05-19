@@ -68,6 +68,38 @@ export type Database = {
           },
         ]
       }
+      exam_session_centers: {
+        Row: {
+          created_at: string
+          exam_session_id: number
+          notes: string | null
+          site_id: number
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          exam_session_id: number
+          notes?: string | null
+          site_id: number
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          exam_session_id?: number
+          notes?: string | null
+          site_id?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "exam_session_centers_site_id_fkey"
+            columns: ["site_id"]
+            isOneToOne: false
+            referencedRelation: "test_centers"
+            referencedColumns: ["site_id"]
+          },
+        ]
+      }
       password_reset_tokens: {
         Row: {
           account_id: string

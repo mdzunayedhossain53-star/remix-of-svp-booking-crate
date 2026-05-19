@@ -201,6 +201,82 @@ serve(async (req) => {
       });
     }
 
+    // GET /test-centers — list of all test centers for the picker
+    if (path === "/test-centers" && req.method === "GET") {
+      const { data, error } = await supabase
+        .from("test_centers")
+        .select("site_id, name, city")
+        .order("name", { ascending: true });
+      if (error) throw error;
+      return new Response(JSON.stringify({ test_centers: data || [] }), {
+        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // GET /session-centers — list mappings joined with test center
+    if (path === "/session-centers" && req.method === "GET") {
+      const { data, error } = await supabase
+        .from("exam_session_centers")
+        .select("exam_session_id, site_id, notes, created_at, updated_at, test_centers(name, city)")
+        .order("updated_at", { ascending: false });
+      if (error) throw error;
+      const rows = (data || []).map((r: any) => ({
+        exam_session_id: r.exam_session_id,
+        site_id: r.site_id,
+        notes: r.notes,
+        center_name: r.test_centers?.name || null,
+        center_city: r.test_centers?.city || null,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      }));
+      return new Response(JSON.stringify({ mappings: rows }), {
+        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // POST /session-centers — upsert mapping
+    if (path === "/session-centers" && req.method === "POST") {
+      const { examSessionId, siteId, notes } = await req.json();
+      const esid = Number(examSessionId);
+      const sid = Number(siteId);
+      if (!Number.isFinite(esid) || esid <= 0 || !Number.isFinite(sid) || sid <= 0) {
+        return new Response(JSON.stringify({ message: "examSessionId and siteId must be positive numbers" }), {
+          status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      const { data: tc } = await supabase.from("test_centers").select("site_id").eq("site_id", sid).single();
+      if (!tc) {
+        return new Response(JSON.stringify({ message: "Unknown site_id" }), {
+          status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      const { data, error } = await supabase
+        .from("exam_session_centers")
+        .upsert({ exam_session_id: esid, site_id: sid, notes: notes || null }, { onConflict: "exam_session_id" })
+        .select()
+        .single();
+      if (error) throw error;
+      return new Response(JSON.stringify({ message: "Mapping saved", mapping: data }), {
+        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // DELETE /session-centers/:examSessionId
+    const scDelMatch = path.match(/^\/session-centers\/([^/]+)$/);
+    if (scDelMatch && req.method === "DELETE") {
+      const esid = Number(scDelMatch[1]);
+      if (!Number.isFinite(esid)) {
+        return new Response(JSON.stringify({ message: "Invalid exam session id" }), {
+          status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      const { error } = await supabase.from("exam_session_centers").delete().eq("exam_session_id", esid);
+      if (error) throw error;
+      return new Response(JSON.stringify({ message: "Mapping deleted" }), {
+        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     return new Response(JSON.stringify({ message: "Not found" }), {
       status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
