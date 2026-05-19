@@ -20,6 +20,9 @@ export default function BookingPage() {
   const [availableDateEntries, setAvailableDateEntries] = useState<{ city: string; date: string }[]>([]);
   const [sessions, setSessions] = useState<any[]>([]);
   const [testCenterMap, setTestCenterMap] = useState<Map<string, string>>(new Map());
+  // name (lowercased) -> site_id, resolved from local DB so we can stamp site_id
+  // on sessions when SVP returns site_id=null.
+  const [centerNameToSiteId, setCenterNameToSiteId] = useState<Map<string, string>>(new Map());
   const [selectedOccupationId, setSelectedOccupationId] = useState("");
   const [selectedCity, setSelectedCity] = useState("");
   const [availableDate, setAvailableDate] = useState("");
@@ -67,11 +70,22 @@ export default function BookingPage() {
   );
   const sessionsWithResolvedCenters = useMemo(
     () => cityFilteredSessions.map((item) => {
-      const realName = testCenterMap.get(`session:${getSessionId(item)}`);
-      if (!realName || getExplicitSessionCenterName(item)) return item;
-      return { ...item, test_center: { ...(item?.test_center || {}), name: realName } };
+      const explicit = getExplicitSessionCenterName(item);
+      const mappedName = testCenterMap.get(`session:${getSessionId(item)}`);
+      const resolvedName = explicit || mappedName || "";
+      const resolvedSiteId = getSessionSiteId(item) || (resolvedName ? centerNameToSiteId.get(resolvedName.trim().toLowerCase()) : "") || "";
+      if (!resolvedName && !resolvedSiteId) return item;
+      return {
+        ...item,
+        ...(resolvedSiteId ? { site_id: resolvedSiteId } : {}),
+        test_center: {
+          ...(item?.test_center || {}),
+          ...(resolvedName ? { name: resolvedName } : {}),
+          ...(resolvedSiteId ? { site_id: resolvedSiteId, id: item?.test_center?.id ?? resolvedSiteId } : {}),
+        },
+      };
     }),
-    [cityFilteredSessions, testCenterMap]
+    [cityFilteredSessions, testCenterMap, centerNameToSiteId]
   );
   const centerOptions = useMemo(() => {
     const options = buildCenterOptions(sessionsWithResolvedCenters);
@@ -338,7 +352,25 @@ export default function BookingPage() {
         });
       }
 
+      // 4. Build a name -> site_id lookup from local DB for every resolved
+      //    center name. This lets us stamp site_id onto sessions even when
+      //    SVP returns site_id=null (the API just gives us the name).
+      const resolvedNames = Array.from(new Set(
+        Array.from(newMap.values()).map((n) => String(n || "").trim()).filter(Boolean)
+      ));
+      const newSiteIdMap = new Map(centerNameToSiteId);
+      let siteIdChanged = false;
+      const missingNames = resolvedNames.filter((n) => !newSiteIdMap.has(n.toLowerCase()));
+      if (missingNames.length) {
+        const { data: rows } = await supabase.from("test_centers").select("site_id, name").in("name", missingNames);
+        rows?.forEach((row: any) => {
+          const k = String(row.name || "").trim().toLowerCase();
+          if (k && !newSiteIdMap.has(k)) { newSiteIdMap.set(k, String(row.site_id)); siteIdChanged = true; }
+        });
+      }
+
       if (active && changed) setTestCenterMap(newMap);
+      if (active && siteIdChanged) setCenterNameToSiteId(newSiteIdMap);
     })();
     return () => { active = false; };
   }, [sessions]);
