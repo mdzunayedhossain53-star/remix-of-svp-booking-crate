@@ -79,9 +79,12 @@ export function getSessionSiteId(item: any): string {
 
 export function getSessionSiteCity(item: any): string {
   const sc = item?.site_city;
+  const tc = item?.test_center;
+  // Support both legacy SVP shape (test_center.city) and new SVP shape (test_center.test_center_city)
   return String(
     (typeof sc === "object" ? sc?.name || sc?.city || sc?.english_name : sc) ||
-    item?.test_center?.city || item?.city || item?.site_city_name || item?.test_center_city || ""
+    tc?.test_center_city || tc?.city ||
+    item?.city || item?.site_city_name || item?.test_center_city || ""
   );
 }
 
@@ -210,7 +213,11 @@ function getAvailableDateCity(item: any): string {
   const nsc = typeof sc === "object" ? (sc?.name || sc?.city || sc?.english_name || "") : sc;
   const tc = item?.test_center?.city;
   const ntc = typeof tc === "object" ? (tc?.name || tc?.city || tc?.english_name || "") : tc;
-  return String(item.city || nsc || item.site_city_name || item.test_center_city || ntc || item.site?.city || "").trim();
+  // Support new SVP shape (test_center.test_center_city) alongside legacy fields.
+  return String(
+    item.city || nsc || item.site_city_name || item.test_center_city ||
+    item?.test_center?.test_center_city || ntc || item.site?.city || ""
+  ).trim();
 }
 
 function getAvailableDateIso(item: any): string {
