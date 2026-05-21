@@ -542,11 +542,16 @@ export default function BookingPage() {
 
   async function createHold() {
     if (!sessionId) { setError("Select test center / session first"); return; }
-    const sessionIds = Array.from(new Set(
-      (filteredSessions.length ? filteredSessions : [selectedSession])
-        .map((item) => Number(getSessionId(item))).filter((item) => Number.isFinite(item) && item > 0)
-    ));
-    if (!sessionIds.length) { setError("No valid exam sessions found for hold creation"); return; }
+    // Only hold the SELECTED session, not every session in the city.
+    // Holding the whole city would let SVP confirm a different test center
+    // when the booking POST is made with hold_id, because the hold covers
+    // multiple distinct centers in the same city.
+    const selectedSessionId = Number(sessionId);
+    if (!Number.isFinite(selectedSessionId) || selectedSessionId <= 0) {
+      setError("No valid exam session selected for hold creation");
+      return;
+    }
+    const sessionIds = [selectedSessionId];
     setCreatingHold(true); setError(""); setStatus("");
     try {
       const data = await api("/temporary-seats", { method: "POST", body: { exam_session_id: sessionIds, methodology: methodology || "in_person" } });
