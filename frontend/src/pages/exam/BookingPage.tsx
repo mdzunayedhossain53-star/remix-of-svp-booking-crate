@@ -606,13 +606,23 @@ export default function BookingPage() {
         setStatus(`Reservation rescheduled successfully: #${nextReservationId}`);
         if (nextReservationId) await openTicketPdf(String(nextReservationId));
       } else {
-        // Normal new booking
+        // Normal new booking.
+        //
+        // CRITICAL: Match the official SVP frontend (svp-international.pacc.sa) behaviour
+        // EXACTLY — it sends `site_id: null`, `site_city: null`, `hold_id: null` and lets
+        // the SVP server determine the test center from `exam_session_id`.
+        //
+        // If we send a `site_id`/`site_city` (e.g. an admin-mapped fallback like
+        // site_id=1), SVP treats that as an override and may confirm the booking
+        // in a DIFFERENT centre within the same city than the one the user picked.
+        // Likewise, `hold_id` is left null here so the reservation binds purely to
+        // the chosen `exam_session_id` (the temporary seat hold above is informational
+        // only — SVP's own UI never forwards hold_id into the reservation POST).
         const data: any = await api("/exam-reservations", {
           method: "POST", body: {
             exam_session_id: Number(sessionId), occupation_id: Number(selectedOccupationId),
             methodology: methodology || "in_person", language_code: effectiveLanguageCode,
-            site_id: siteId ? Number(siteId) : null, site_city: siteCity || selectedCity || null,
-            hold_id: holdId ? Number(holdId) : null,
+            site_id: null, site_city: null, hold_id: null,
           },
         });
         const nextReservationId = extractId(data, ["id", "reservation_id", "exam_reservation_id"]);
