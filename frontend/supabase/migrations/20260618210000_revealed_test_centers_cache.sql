@@ -9,7 +9,7 @@
 -- the real centre instantly without creating another draft.
 --
 -- This SQL must be run against the production Supabase project
---    https://llwquxmlsdmdtmmktqqe.supabase.co
+--    https://qdlqrsvkenalwhmfdbaf.supabase.co
 -- via the Dashboard SQL editor or `supabase db push` once.
 
 create table if not exists public.revealed_test_centers (
