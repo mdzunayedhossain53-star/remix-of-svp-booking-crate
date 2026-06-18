@@ -11,52 +11,16 @@ import {
   formatDateLabel, detectBookingMode, resolveSessionCenter, SectionCenterRule,
 } from "@/lib/booking-utils";
 import { getCachedCenter, setCachedCenter, CachedCenter } from "@/lib/revealed-centers-cache";
+import { deepFindTestCenter as deepFindTestCenterShared, RevealedCenter as RevealedCenterShared } from "@/lib/deep-find-test-center";
+import { autoRevealMissingCenters } from "@/lib/auto-reveal-cache-misses";
 
 // Walks a nested SVP reservation/session response looking for the
 // authoritative `test_center` object (the one with a real
 // `test_center_id` / `name` / `address`). SVP returns it under a few
 // possible shapes (root.test_center, root.exam_session.test_center, etc.)
 // so we search every level and pick the first one that carries a real id.
-export interface RevealedCenter {
-  name: string;
-  id: string;
-  address: string;
-  city: string;
-}
-
-export function deepFindTestCenter(obj: unknown): RevealedCenter | null {
-  let best: RevealedCenter | null = null;
-  const walk = (node: unknown) => {
-    if (!node || typeof node !== "object") return;
-    if (Array.isArray(node)) { node.forEach(walk); return; }
-    const rec = node as Record<string, unknown>;
-    for (const key of Object.keys(rec)) {
-      const value = rec[key];
-      if ((key === "test_center" || key === "center") && value && typeof value === "object") {
-        const tc = value as Record<string, unknown>;
-        const id = String(tc.test_center_id ?? tc.id ?? tc.site_id ?? "").trim();
-        const name = String(tc.test_center_name ?? tc.name ?? "").trim();
-        // SVP's pre-booking placeholder shape is `{name: "<City> Center",
-        // test_center_id: null, site_id: null}` — so reject it when there
-        // is no id AT ALL. Any object that carries a real id (test_center_id,
-        // id or site_id) AND a name is considered authoritative.
-        if (id && name && id !== "null" && id !== "undefined") {
-          if (!best) {
-            best = {
-              name,
-              id,
-              address: String(tc.address ?? "").trim(),
-              city: String(tc.test_center_city ?? tc.city ?? "").trim(),
-            };
-          }
-        }
-      }
-      walk(value);
-    }
-  };
-  walk(obj);
-  return best;
-}
+export type RevealedCenter = RevealedCenterShared;
+export const deepFindTestCenter = deepFindTestCenterShared;
 
 
 export default function BookingPage() {
@@ -201,6 +165,13 @@ export default function BookingPage() {
         }
         const unique = all;
         setOccupations(unique.map(normalizeOccupation));
+        // 🤖 Auto-reveal cache misses in the background (fire-and-forget).
+        // Runs once per browser tab session — see auto-reveal-cache-misses.ts.
+        // Caps at 15 reveals with 10s spacing so we never trigger SVP's
+        // per-category cooldown for the active user.
+        if (unique.length > 0) {
+          void autoRevealMissingCenters().catch(() => { /* silent background failure */ });
+        }
       } catch (err: any) { setError(err?.message || "Failed to load occupations"); }
       finally { setLoadingOccupations(false); }
     })();

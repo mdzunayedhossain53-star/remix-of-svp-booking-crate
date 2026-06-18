@@ -94,8 +94,21 @@ User language: Bengali (technical terms in English).
 - Final cache: 73 production rows + 2 test rows. Coverage: 73 unique categories × 16 unique centres × 8 cities (Dhaka 42, Rajshahi 13, Chattogram 9, Khulna 3, Cumilla 2, Mymensingh 2, Barishal 1, Sylhet 1).
 - User-driven reveals continue to auto-grow the cache when users hit new (cat, city, date) combos — built into `BookingPage.revealRealCenter` already.
 
+## AUTO-REVEAL CACHE MISSES ON LOGIN (2026-06-18, Conservative — option 1a)
+- New module `/app/frontend/src/lib/auto-reveal-cache-misses.ts` runs ONCE per browser tab session immediately after the BookingPage loads occupations successfully (i.e. SVP token is confirmed valid). Fire-and-forget — never blocks the UI.
+- Flow: list user's accessible occupations → first occupation per category → fetch `/available-dates` for each category in parallel batches of 8 → assemble `(cat, city, date)` candidates → query Supabase `revealed_test_centers` to filter out keys already in cache → reveal up to MAX_REVEALS_PER_SESSION (15) cache misses serially with REVEAL_DELAY_MS (10 s) between calls.
+- Safety:
+  - Hard cap 15 reveals per browser session → no more than ~3 minutes of background activity.
+  - Skips on cache hit so re-running is idempotent.
+  - Stops on first HTTP 422 from SVP (per-category cooldown).
+  - `sessionStorage` flag `auto_reveal_ran` prevents duplicate runs in the same tab.
+  - Each reveal writes through `setCachedCenter` → community-wide Supabase cache + this user's localStorage.
+- Shared helper extracted: `/app/frontend/src/lib/deep-find-test-center.ts` (`deepFindTestCenter` + `RevealedCenter`). BookingPage now re-exports from this module so existing tests + scripts that import from BookingPage keep working.
+- Ops tool: `/tmp/bulk_reveal_deep.py` — iterates EVERY (city, date) per category, skips cached keys (idempotent re-run). Used for one-off back-fills with elevated SVP accounts. Honours SVP cooldown by moving on after a 422.
+- Tests: `/app/frontend/src/lib/auto-reveal-cache-misses.test.ts` — 9 vitest cases covering sessionStorage guard, no-token short-circuit, hard-cap behaviour (20 candidates → 15 attempts), Supabase cache-hit filtering, SVP 422 short-circuit, and internal helper unit tests. Total: 89/89 vitest pass.
+
 ## Current Test Status
-- 80/80 Vitest tests passing across 14 suites (verified 2026-06-18 post bulk-reveal).
+- 89/89 Vitest tests passing across 15 suites (verified 2026-06-18 after auto-reveal feature).
 
 ## Backlog
 - P2 — Obtain fresh SVP API Bearer token for live e2e verification (current Postman token returns 401).
