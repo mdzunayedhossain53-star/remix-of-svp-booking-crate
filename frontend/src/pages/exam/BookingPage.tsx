@@ -10,6 +10,7 @@ import {
   buildCenterOptions, buildCityOptions, buildDateOptions, buildCalendarDays,
   formatDateLabel, detectBookingMode, resolveSessionCenter, SectionCenterRule,
 } from "@/lib/booking-utils";
+import { getCachedCenter, setCachedCenter, CachedCenter } from "@/lib/revealed-centers-cache";
 
 // Walks a nested SVP reservation/session response looking for the
 // authoritative `test_center` object (the one with a real
@@ -523,6 +524,28 @@ export default function BookingPage() {
     if (codes[0]?.code || codes[0]?.language_code) setLanguageCode(String(codes[0].code || codes[0].language_code));
   }, [selectedSession]);
 
+  // 🔍 Auto-resolve the REAL test centre from cache (localStorage first,
+  // then Supabase shared cache) whenever the selected session changes.
+  // If a fresh cached value exists we display it instantly with NO new
+  // draft reservation. The "🔍 Reveal Real Center" button stays available
+  // for sessions that nobody has revealed before.
+  useEffect(() => {
+    let alive = true;
+    if (!sessionId) { setRevealedCenter(null); setRevealMessage(""); return; }
+    // Don't blow away an in-progress reveal or a freshly-confirmed booking.
+    if (revealing) return;
+    (async () => {
+      const cached = await getCachedCenter(sessionId);
+      if (!alive || !cached) return;
+      setRevealedCenter({ name: cached.name, id: cached.id, address: cached.address, city: cached.city });
+      const ageDays = Math.round((Date.now() - Date.parse(cached.revealedAt)) / 86_400_000);
+      const ageLabel = ageDays <= 0 ? "today" : ageDays === 1 ? "1 day ago" : `${ageDays} days ago`;
+      const where = cached.source === "shared" ? "shared cache" : "this browser";
+      setRevealMessage(`Loaded from ${where} (last verified ${ageLabel}). No new draft created.`);
+    })();
+    return () => { alive = false; };
+  }, [sessionId]);
+
   // Fetch session detail (status + seats) for the selected session
   useEffect(() => {
     let active = true;
@@ -671,6 +694,10 @@ export default function BookingPage() {
         return;
       }
       setRevealedCenter(centre);
+      // Persist to both cache layers so the next visit to this session
+      // (same user OR any user via Supabase) does not need to create a
+      // draft. setCachedCenter is fire-and-forget on the Supabase side.
+      setCachedCenter(sessionId, centre);
       const nextReservationId = extractId(data, ["id", "reservation_id", "exam_reservation_id"]);
       if (nextReservationId) {
         // Reveal creates a REAL (unpaid) reservation, so surface it as the
@@ -1022,8 +1049,16 @@ export default function BookingPage() {
             {revealing && <div style={{ fontSize: 13, color: "#475569" }}>Revealing real centre via draft reservation…</div>}
             {revealedCenter && !revealing && (
               <>
-                <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: 0.4, color: "#15803d", marginBottom: 4 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: 0.4, color: "#15803d", marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
                   REAL TEST CENTRE
+                  {/^Loaded from /.test(revealMessage) && (
+                    <span
+                      data-testid="reveal-real-center-cache-badge"
+                      style={{ background: "#dcfce7", color: "#166534", borderRadius: 999, padding: "1px 8px", fontSize: 10, fontWeight: 700, letterSpacing: 0.3 }}
+                    >
+                      FROM CACHE
+                    </span>
+                  )}
                 </div>
                 <div data-testid="reveal-real-center-name" style={{ fontSize: 15, fontWeight: 600, color: "#0f172a" }}>
                   {revealedCenter.name} <span style={{ color: "#64748b", fontWeight: 500 }}>(#{revealedCenter.id})</span>
