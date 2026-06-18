@@ -178,22 +178,28 @@ export default function BookingPage() {
         const perPage = 200;
         const all: any[] = [];
         let page = 1;
-        // Fetch all pages until we get an empty/short page (max 50 pages safety)
+        // Fetch all pages until we get an empty/short page OR the page no longer brings new ids.
+        //
+        // Some SVP proxy deployments ignore `per_page` and return the full list every time.
+        // Without a "no-progress" guard the loop would spin 50 times — ~3-6s per call — and
+        // freeze the Occupation dropdown on "Loading…" for minutes. Track the dedup-id set
+        // BEFORE each page and break the moment a page adds zero new ids.
+        const seen = new Set<string>();
         for (; page <= 50; page++) {
           const data = await api(`/occupations?locale=en&per_page=${perPage}&page=${page}`);
           const arr = pickArray(data);
           if (!arr.length) break;
-          all.push(...arr);
+          const before = seen.size;
+          for (const item of arr) {
+            const k = String(item?.id ?? "");
+            if (k && !seen.has(k)) { seen.add(k); all.push(item); }
+          }
+          // Stop when this page brought nothing new — pagination is either exhausted
+          // or the proxy is ignoring `per_page` and just echoing the full list.
+          if (seen.size === before) break;
           if (arr.length < perPage) break;
         }
-        // Dedupe by id
-        const seen = new Set<string>();
-        const unique = all.filter((it) => {
-          const k = String(it?.id ?? "");
-          if (!k || seen.has(k)) return false;
-          seen.add(k);
-          return true;
-        });
+        const unique = all;
         setOccupations(unique.map(normalizeOccupation));
       } catch (err: any) { setError(err?.message || "Failed to load occupations"); }
       finally { setLoadingOccupations(false); }
@@ -524,6 +530,18 @@ export default function BookingPage() {
     if (codes[0]?.code || codes[0]?.language_code) setLanguageCode(String(codes[0].code || codes[0].language_code));
   }, [selectedSession]);
 
+  // Stable cache key for the revealed-centers cache.
+  //
+  // SVP rotates the encrypted exam_session_id token on EVERY request,
+  // so we cannot use it as a cache key (different per page load). The
+  // tuple `(category_id, city, exam_date)` uniquely identifies one
+  // session in our test data, and the SVP server reuses the same real
+  // test centre for that tuple, so we cache by the tuple instead.
+  const sessionCacheKey = useMemo(() => {
+    if (!categoryId || !selectedCity || !availableDate) return "";
+    return `cat-${categoryId}|city-${String(selectedCity).toLowerCase()}|date-${availableDate}`;
+  }, [categoryId, selectedCity, availableDate]);
+
   // 🔍 Auto-resolve the REAL test centre from cache (localStorage first,
   // then Supabase shared cache) whenever the selected session changes.
   // If a fresh cached value exists we display it instantly with NO new
@@ -531,11 +549,11 @@ export default function BookingPage() {
   // for sessions that nobody has revealed before.
   useEffect(() => {
     let alive = true;
-    if (!sessionId) { setRevealedCenter(null); setRevealMessage(""); return; }
+    if (!sessionCacheKey || !sessionId) { setRevealedCenter(null); setRevealMessage(""); return; }
     // Don't blow away an in-progress reveal or a freshly-confirmed booking.
     if (revealing) return;
     (async () => {
-      const cached = await getCachedCenter(sessionId);
+      const cached = await getCachedCenter(sessionCacheKey);
       if (!alive || !cached) return;
       setRevealedCenter({ name: cached.name, id: cached.id, address: cached.address, city: cached.city });
       const ageDays = Math.round((Date.now() - Date.parse(cached.revealedAt)) / 86_400_000);
@@ -544,7 +562,7 @@ export default function BookingPage() {
       setRevealMessage(`Loaded from ${where} (last verified ${ageLabel}). No new draft created.`);
     })();
     return () => { alive = false; };
-  }, [sessionId]);
+  }, [sessionCacheKey, sessionId, revealing]);
 
   // Fetch session detail (status + seats) for the selected session
   useEffect(() => {
@@ -697,7 +715,10 @@ export default function BookingPage() {
       // Persist to both cache layers so the next visit to this session
       // (same user OR any user via Supabase) does not need to create a
       // draft. setCachedCenter is fire-and-forget on the Supabase side.
-      setCachedCenter(sessionId, centre);
+      //
+      // We key by the (category, city, date) tuple — NOT by the encrypted
+      // exam_session_id, because SVP rotates that token on every request.
+      if (sessionCacheKey) setCachedCenter(sessionCacheKey, centre);
       const nextReservationId = extractId(data, ["id", "reservation_id", "exam_reservation_id"]);
       if (nextReservationId) {
         // Reveal creates a REAL (unpaid) reservation, so surface it as the

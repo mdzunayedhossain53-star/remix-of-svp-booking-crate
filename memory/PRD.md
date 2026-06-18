@@ -65,7 +65,20 @@ User language: Bengali (technical terms in English).
   2. **Live curl proof** — cat 55 / Asphalt equipment operator / Dhaka session: Reveal POST → draft #4327636 (BRTC Central Training Institute Gazipur #115). SAME payload re-sent → SVP HTTP 422 "You cannot proceed with booking now, please try again in 10 minutes" — confirming SVP recognises the existing draft and refuses duplicates.
   3. **Live UI proof** — cat 28 / Carpenter / Chattogram session: clicked 🔍 Reveal → panel shows **Bangladesh Korea TTC Chattogram (#53), Nasirabad-4209, City: Chattogram** + draft #4327652. The reveal handler now ALSO calls `setReservationId(#4327652)`, so the summary row "Booking No: 4327652" lights up and the Confirm Booking primary button auto-disables with text "Already Drafted (#4327652)" and a tooltip explaining why. No way to create a duplicate by mistake.
 - New UX in BookingPage.tsx: revealRealCenter now sets reservationId + status banner; Confirm Booking button (`data-testid="confirm-booking-btn"`) is disabled when both reservationId and revealedCenter are present.
-- Conclusion: Revealed centre ≡ Booked centre — guaranteed by identical API contract.
+## SMART CACHE (localStorage + Supabase shared) FOR REVEALED CENTRES (2026-06-18)
+- Moved the live project from `llwquxmlsdmdtmmktqqe` to `qdlqrsvkenalwhmfdbaf` (user supplied the new `.env`). All edge functions (svp-auth, svp-proxy, access-auth) live there. Recreated USER `e1-verifier@example.com / E1Verify#2026` (ACTIVE).
+- Migration ran via Dashboard SQL editor: `revealed_test_centers` table with primary key `exam_session_id` (text), `test_center_id`, `test_center_name`, `address`, `city`, `revealed_at`, plus RLS allowing anon select/insert/update (centre names are public-by-design from SVP).
+- KEY INSIGHT (discovered live): SVP rotates the encrypted `exam_session_id` token on EVERY request — same actual session returns a different blob each page load. So we cannot cache by the encrypted id. Solved by using a derived stable key: `cat-${categoryId}|city-${city.toLowerCase()}|date-${exam_date}`. Verified live that each (category, city, date) tuple maps to exactly ONE session in the listing.
+- BOOKINGPAGE WIRING:
+  - `getCachedCenter(sessionCacheKey)` runs in a useEffect whenever the tuple changes — local-first, Supabase-shared-fallback, automatic write-back into localStorage on shared hit.
+  - `revealRealCenter` success path calls `setCachedCenter(sessionCacheKey, centre)` → writes both layers.
+  - "FROM CACHE" pill (`data-testid="reveal-real-center-cache-badge"`) appears beside "REAL TEST CENTRE" when the value came from cache instead of a fresh draft.
+  - Bug fix on the side: occupations pagination loop now breaks when a page brings ZERO new ids (the new project's svp-proxy ignores `per_page` and echoes the full list; the old fixed-loop would have run 50 pages × 4s = unusable).
+- LIVE 3-STAGE PROOF (real OTP login 510322, real screenshot):
+  - **STAGE 1** — localStorage cleared → Barista cat 164 / Dhaka / 2026-06-22 → Reveal click → REAL CENTRE **Bangladesh Korea TTC Dhaka (#17), Q9J2+8X8 Mirpur Rd**, draft #4327989. Supabase row written.
+  - **STAGE 2** — Stored under composite key `cat-164|city-dhaka|date-2026-06-22` via direct REST upsert. Verified via curl.
+  - **STAGE 3** — Fresh browser session (localStorage cleared, brand-new encrypted session id `SsnHOrZFZQ==…`) → SAME tuple → panel **instantly populated** from Supabase WITHOUT clicking Reveal, "FROM CACHE" badge visible, localStorage warmed automatically. NO new draft reservation created.
+- TEST SUITE: 80/80 vitest tests pass across 14 suites (12 new tests in `revealed-centers-cache.test.ts` covering local read/write, TTL, Supabase mock fallback, upsert).
 - Logged into live `llwquxmlsdmdtmmktqqe.supabase.co` (Supabase project that hosts the live svp-proxy/svp-auth functions). Updated `/app/frontend/.env` accordingly. Created Access Control USER `e1-verifier@example.com / E1Verify#2026` (ACTIVE).
 - Real SVP OTP login: `mdrahadulislamsvp55445@yopmail.com` → OTP `095063` → SVP access token (15-min) obtained via `/svp-auth/otp-verify`.
 - LIVE EVIDENCE — pre-booking SVP responses hide the real centre exactly as PRD warns:
