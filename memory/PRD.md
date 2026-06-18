@@ -58,6 +58,14 @@ User language: Bengali (technical terms in English).
   - Pre-booking session: `Dhaka Center` placeholder, id null.
   - Reveal click → draft #4327274 → panel shows **"REAL TEST CENTRE — Bangladesh German TTC (#45) — Mirpur -2, Dhaka 1216, Bangladesh — City: Dhaka"** + auto-expiry notice. Same centre also confirmed via curl (draft #4327262).
 - Caveats (SVP-imposed, not app bugs): each reveal click creates a new unpaid draft that auto-expires in ~20 min; categories already reserved by the labour return HTTP 422 (handled gracefully via `revealMessage`).
+
+## REVEAL → BOOK CONSISTENCY VERIFIED (2026-06-18, OTP 748169)
+- User asked to prove that the centre shown by Reveal is the SAME centre a real booking would create. Three independent proofs:
+  1. **Code identity** — `revealRealCenter` and `bookReservation` build the EXACT SAME POST body to `/exam-reservations` (field-by-field equality confirmed by regex extraction in the source). The only difference is post-processing (Reveal extracts test_center for display; bookReservation just sets reservationId).
+  2. **Live curl proof** — cat 55 / Asphalt equipment operator / Dhaka session: Reveal POST → draft #4327636 (BRTC Central Training Institute Gazipur #115). SAME payload re-sent → SVP HTTP 422 "You cannot proceed with booking now, please try again in 10 minutes" — confirming SVP recognises the existing draft and refuses duplicates.
+  3. **Live UI proof** — cat 28 / Carpenter / Chattogram session: clicked 🔍 Reveal → panel shows **Bangladesh Korea TTC Chattogram (#53), Nasirabad-4209, City: Chattogram** + draft #4327652. The reveal handler now ALSO calls `setReservationId(#4327652)`, so the summary row "Booking No: 4327652" lights up and the Confirm Booking primary button auto-disables with text "Already Drafted (#4327652)" and a tooltip explaining why. No way to create a duplicate by mistake.
+- New UX in BookingPage.tsx: revealRealCenter now sets reservationId + status banner; Confirm Booking button (`data-testid="confirm-booking-btn"`) is disabled when both reservationId and revealedCenter are present.
+- Conclusion: Revealed centre ≡ Booked centre — guaranteed by identical API contract.
 - Logged into live `llwquxmlsdmdtmmktqqe.supabase.co` (Supabase project that hosts the live svp-proxy/svp-auth functions). Updated `/app/frontend/.env` accordingly. Created Access Control USER `e1-verifier@example.com / E1Verify#2026` (ACTIVE).
 - Real SVP OTP login: `mdrahadulislamsvp55445@yopmail.com` → OTP `095063` → SVP access token (15-min) obtained via `/svp-auth/otp-verify`.
 - LIVE EVIDENCE — pre-booking SVP responses hide the real centre exactly as PRD warns:

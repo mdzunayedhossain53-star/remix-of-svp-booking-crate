@@ -673,7 +673,13 @@ export default function BookingPage() {
       setRevealedCenter(centre);
       const nextReservationId = extractId(data, ["id", "reservation_id", "exam_reservation_id"]);
       if (nextReservationId) {
-        // Remember the draft id so the user can see it expires soon.
+        // Reveal creates a REAL (unpaid) reservation, so surface it as the
+        // booking number — "Confirm Booking" would otherwise create a
+        // duplicate and SVP would reject it with HTTP 422. The user now
+        // sees `Booking No: #N` immediately and can move straight to
+        // payment.
+        setReservationId(String(nextReservationId));
+        setStatus(`Reservation drafted via reveal: #${nextReservationId}. Pay within ~20 min to finalize, or it auto-expires.`);
         setRevealMessage(`Revealed via draft reservation #${nextReservationId} (auto-expires ~20 min, no payment taken).`);
       }
     } catch (err: any) {
@@ -1062,8 +1068,21 @@ export default function BookingPage() {
               {booking ? "Confirming..." : "Confirm Reschedule"}
             </button>
           ) : (
-            <button className="primary-btn" type="button" onClick={bookReservation} disabled={booking || !sessionId}>
-              {booking ? "Confirming..." : "Confirm Booking"}
+            <button
+              className="primary-btn"
+              type="button"
+              onClick={bookReservation}
+              disabled={booking || !sessionId || (!!reservationId && !!revealedCenter)}
+              data-testid="confirm-booking-btn"
+              title={!!reservationId && !!revealedCenter
+                ? `Reveal already created reservation #${reservationId} for this session. Use the existing draft or wait ~20 min for it to expire.`
+                : undefined}
+            >
+              {booking
+                ? "Confirming..."
+                : (!!reservationId && !!revealedCenter
+                    ? `Already Drafted (#${reservationId})`
+                    : "Confirm Booking")}
             </button>
           )}
         </div>
