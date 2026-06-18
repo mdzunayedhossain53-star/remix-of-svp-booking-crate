@@ -47,7 +47,17 @@ User language: Bengali (technical terms in English).
   - `createHold` now passes the raw `sessionId` string through to `/temporary-seats` when it isn't a pure positive integer. Previously, encrypted tokens like `g/8sT/c51g==--...` were coerced via `Number()` → NaN, breaking holds with "No valid exam session selected for hold creation".
   - `bookReservation` now sends `exam_session_id` as the raw string when encrypted (previously `Number(sessionId)` → NaN → JSON `null` → SVP HTTP 400). Reschedule path got the same treatment.
   - Regression suite `BookingPage.encrypted-session-id.test.ts` (6 tests): encrypted passthrough, numeric coercion, empty rejection, JSON serialization round-trip, and a snapshot of the OLD buggy behaviour for documentation.
-- Total: **62/62 Vitest tests pass** across 12 suites.
+- Total: **68/68 Vitest tests pass** across 13 suites.
+
+## "🔍 REVEAL REAL CENTER" FEATURE IMPLEMENTED (2026-06-18)
+- Added pre-booking "Reveal Real Center" button to `BookingPage.tsx` (data-testid: `reveal-real-center-btn`).
+- Flow on click: POST `/temporary-seats` (encrypted token accepted) → POST `/exam-reservations` with the SVP-frontend-parity payload (`site_id: null, site_city: null, hold_id: null`) → walk the response via `deepFindTestCenter` → display the real centre.
+- New module-level export `deepFindTestCenter(obj)` finds the first `test_center`/`center` node carrying a real id + name. Tests in `BookingPage.deepFindTestCenter.test.ts` (6 cases) cover root.test_center, nested exam_session.test_center, placeholder rejection (id=null), preferring the first real centre, malformed input, and `site_id` fallback.
+- UI panel (data-testid: `reveal-real-center-panel`): green when revealed city matches the selected city, red `reveal-real-center-city-mismatch` warning when SVP would route to a different city, neutral grey while loading. Friendly message on `existing_reservation_for_category`.
+- LIVE VERIFIED via UI screenshot (Barber occupation 2008, cat 50, Dhaka, 2026-06-21):
+  - Pre-booking session: `Dhaka Center` placeholder, id null.
+  - Reveal click → draft #4327274 → panel shows **"REAL TEST CENTRE — Bangladesh German TTC (#45) — Mirpur -2, Dhaka 1216, Bangladesh — City: Dhaka"** + auto-expiry notice. Same centre also confirmed via curl (draft #4327262).
+- Caveats (SVP-imposed, not app bugs): each reveal click creates a new unpaid draft that auto-expires in ~20 min; categories already reserved by the labour return HTTP 422 (handled gracefully via `revealMessage`).
 - Logged into live `llwquxmlsdmdtmmktqqe.supabase.co` (Supabase project that hosts the live svp-proxy/svp-auth functions). Updated `/app/frontend/.env` accordingly. Created Access Control USER `e1-verifier@example.com / E1Verify#2026` (ACTIVE).
 - Real SVP OTP login: `mdrahadulislamsvp55445@yopmail.com` → OTP `095063` → SVP access token (15-min) obtained via `/svp-auth/otp-verify`.
 - LIVE EVIDENCE — pre-booking SVP responses hide the real centre exactly as PRD warns:
@@ -58,7 +68,7 @@ User language: Bengali (technical terms in English).
 - Conclusion: the booking POST that uses `site_id: null, site_city: null, hold_id: null` (our fix) lets SVP bind the reservation to the real `exam_session_id`-derived centre instead of overriding from stale UI hints. Draft auto-expires in ~20 min — no money spent.
 
 ## Current Test Status
-- 62/62 Vitest tests passing across 12 suites.
+- 68/68 Vitest tests passing across 13 suites.
 
 ## Backlog
 - P2 — Obtain fresh SVP API Bearer token for live e2e verification (current Postman token returns 401).

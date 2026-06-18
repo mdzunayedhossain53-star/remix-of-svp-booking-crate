@@ -11,7 +11,51 @@ import {
   formatDateLabel, detectBookingMode, resolveSessionCenter, SectionCenterRule,
 } from "@/lib/booking-utils";
 
+// Walks a nested SVP reservation/session response looking for the
+// authoritative `test_center` object (the one with a real
+// `test_center_id` / `name` / `address`). SVP returns it under a few
+// possible shapes (root.test_center, root.exam_session.test_center, etc.)
+// so we search every level and pick the first one that carries a real id.
+export interface RevealedCenter {
+  name: string;
+  id: string;
+  address: string;
+  city: string;
+}
 
+export function deepFindTestCenter(obj: unknown): RevealedCenter | null {
+  let best: RevealedCenter | null = null;
+  const walk = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    const rec = node as Record<string, unknown>;
+    for (const key of Object.keys(rec)) {
+      const value = rec[key];
+      if ((key === "test_center" || key === "center") && value && typeof value === "object") {
+        const tc = value as Record<string, unknown>;
+        const id = String(tc.test_center_id ?? tc.id ?? tc.site_id ?? "").trim();
+        const name = String(tc.test_center_name ?? tc.name ?? "").trim();
+        // SVP's pre-booking placeholder shape is `{name: "<City> Center",
+        // test_center_id: null, site_id: null}` — so reject it when there
+        // is no id AT ALL. Any object that carries a real id (test_center_id,
+        // id or site_id) AND a name is considered authoritative.
+        if (id && name && id !== "null" && id !== "undefined") {
+          if (!best) {
+            best = {
+              name,
+              id,
+              address: String(tc.address ?? "").trim(),
+              city: String(tc.test_center_city ?? tc.city ?? "").trim(),
+            };
+          }
+        }
+      }
+      walk(value);
+    }
+  };
+  walk(obj);
+  return best;
+}
 
 
 export default function BookingPage() {
@@ -56,6 +100,9 @@ export default function BookingPage() {
   const [sessionDetail, setSessionDetail] = useState<any>(null);
   const [occupationSearch, setOccupationSearch] = useState("");
   const [isOccupationOpen, setIsOccupationOpen] = useState(false);
+  const [revealedCenter, setRevealedCenter] = useState<RevealedCenter | null>(null);
+  const [revealing, setRevealing] = useState(false);
+  const [revealMessage, setRevealMessage] = useState("");
   const occupationRef = useRef<HTMLDivElement>(null);
 
   const selectedOccupation = useMemo(
@@ -178,6 +225,7 @@ export default function BookingPage() {
   useEffect(() => {
     setAvailableDate(""); setSessions([]); setSelectedCenterId(""); setSessionId("");
     setSiteId(""); setSiteCity(selectedCity || ""); setHoldId(""); setReservationId("");
+    setRevealedCenter(null); setRevealMessage("");
     if (selectedCity) setStatus(`City selected: ${selectedCity}. Loading sessions for the selected date.`);
   }, [selectedCity]);
 
@@ -568,6 +616,79 @@ export default function BookingPage() {
     finally { setCreatingHold(false); }
   }
 
+  // 🔍 Reveal real test centre BEFORE finalising payment.
+  //
+  // SVP hides the real centre identity in /exam-sessions (it returns the
+  // placeholder "<City> Center" with id=null). The ONLY way to read the
+  // real centre pre-payment is to create a draft reservation: SVP attaches
+  // the real `test_center` object to the reservation response. The draft
+  // auto-expires within ~20 minutes (no money charged, no payment record).
+  //
+  // Flow: hold (encrypted token accepted) → reservation POST (with our
+  // null-site_id payload) → deepFindTestCenter on the response → display.
+  async function revealRealCenter() {
+    if (!sessionId) { setRevealMessage("Select an exam session first."); return; }
+    if (!selectedOccupationId) { setRevealMessage("Select an occupation first."); return; }
+    const sessionCodes = getPrometricCodes(selectedSession);
+    const effectiveLanguageCode = languageCode || selectedOccupation?.languageCodes?.[0]?.code || sessionCodes?.[0]?.code || sessionCodes?.[0]?.language_code || "";
+    if (!effectiveLanguageCode) { setRevealMessage("Select a language first."); return; }
+
+    const raw = String(sessionId).trim();
+    const asNumber = Number(raw);
+    const examSessionIdForBody: string | number =
+      Number.isFinite(asNumber) && asNumber > 0 && String(asNumber) === raw ? asNumber : raw;
+
+    setRevealing(true); setRevealMessage(""); setRevealedCenter(null);
+    try {
+      // 1) Hold (informational — required by SVP business rules even though
+      //    we never forward hold_id into the reservation POST).
+      try {
+        await api("/temporary-seats", {
+          method: "POST",
+          body: { exam_session_id: [examSessionIdForBody], methodology: methodology || "in_person" },
+        });
+      } catch {
+        // hold may already exist for this session — that is OK, proceed.
+      }
+
+      // 2) Draft reservation with the SVP-frontend-parity payload. This is
+      //    the same body bookReservation() uses, so the revealed centre is
+      //    exactly the one a real booking would land in.
+      const data: any = await api("/exam-reservations", {
+        method: "POST",
+        body: {
+          exam_session_id: examSessionIdForBody,
+          occupation_id: Number(selectedOccupationId),
+          methodology: methodology || "in_person",
+          language_code: effectiveLanguageCode,
+          site_id: null, site_city: null, hold_id: null,
+        },
+      });
+
+      const centre = deepFindTestCenter(data);
+      if (!centre) {
+        setRevealMessage("Could not extract the real test centre from the SVP response. It may not be assigned yet — try again in a moment.");
+        return;
+      }
+      setRevealedCenter(centre);
+      const nextReservationId = extractId(data, ["id", "reservation_id", "exam_reservation_id"]);
+      if (nextReservationId) {
+        // Remember the draft id so the user can see it expires soon.
+        setRevealMessage(`Revealed via draft reservation #${nextReservationId} (auto-expires ~20 min, no payment taken).`);
+      }
+    } catch (err: any) {
+      const details = err?.data?.details || err?.details;
+      if (details?.errors?.reservation === "existing_reservation_for_category" ||
+          String(details?.errors?.reservation || "").toLowerCase().includes("existing")) {
+        setRevealMessage("You already have an active reservation for this category — cancel it first to reveal centres for new bookings.");
+      } else {
+        setRevealMessage(err?.message || "Failed to reveal real centre.");
+      }
+    } finally {
+      setRevealing(false);
+    }
+  }
+
   async function bookReservation() {
     if (!sessionId) { setError("Select test center / session first"); return; }
     try { await api(`/exam-session/${encodeURIComponent(sessionId)}?locale=en`); }
@@ -872,7 +993,67 @@ export default function BookingPage() {
           <div><span>Booking No:</span> <strong>{reservationId || "-"}</strong></div>
         </div>
 
+        {/* 🔍 Reveal Real Center — pre-booking real centre check. */}
+        {(revealedCenter || revealMessage || revealing) && (
+          <div
+            data-testid="reveal-real-center-panel"
+            style={{
+              marginTop: 12,
+              padding: "12px 16px",
+              borderRadius: 10,
+              border: revealedCenter
+                ? (revealedCenter.city && selectedCity && revealedCenter.city.toLowerCase() !== selectedCity.toLowerCase()
+                    ? "1px solid #fecaca"
+                    : "1px solid #bbf7d0")
+                : "1px solid #e5e7eb",
+              background: revealedCenter
+                ? (revealedCenter.city && selectedCity && revealedCenter.city.toLowerCase() !== selectedCity.toLowerCase()
+                    ? "#fef2f2"
+                    : "#f0fdf4")
+                : "#f9fafb",
+            }}
+          >
+            {revealing && <div style={{ fontSize: 13, color: "#475569" }}>Revealing real centre via draft reservation…</div>}
+            {revealedCenter && !revealing && (
+              <>
+                <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: 0.4, color: "#15803d", marginBottom: 4 }}>
+                  REAL TEST CENTRE
+                </div>
+                <div data-testid="reveal-real-center-name" style={{ fontSize: 15, fontWeight: 600, color: "#0f172a" }}>
+                  {revealedCenter.name} <span style={{ color: "#64748b", fontWeight: 500 }}>(#{revealedCenter.id})</span>
+                </div>
+                {revealedCenter.address && (
+                  <div style={{ fontSize: 13, color: "#475569", marginTop: 2 }}>{revealedCenter.address}</div>
+                )}
+                {revealedCenter.city && (
+                  <div style={{ fontSize: 13, color: "#475569", marginTop: 2 }}>City: {revealedCenter.city}</div>
+                )}
+                {revealedCenter.city && selectedCity && revealedCenter.city.toLowerCase() !== selectedCity.toLowerCase() && (
+                  <div data-testid="reveal-real-center-city-mismatch" style={{ fontSize: 12, fontWeight: 700, color: "#b91c1c", marginTop: 6 }}>
+                    ⚠ City mismatch — SVP would book in {revealedCenter.city} instead of {selectedCity}.
+                  </div>
+                )}
+              </>
+            )}
+            {revealMessage && !revealing && (
+              <div data-testid="reveal-real-center-message" style={{ fontSize: 12, color: "#475569", marginTop: revealedCenter ? 8 : 0 }}>
+                {revealMessage}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="actions-row">
+          <button
+            className="ghost-btn"
+            type="button"
+            onClick={revealRealCenter}
+            disabled={revealing || !sessionId || !selectedOccupationId}
+            data-testid="reveal-real-center-btn"
+            title="Creates an unpaid draft reservation (auto-expires ~20 min) just to read the centre SVP would assign."
+          >
+            {revealing ? "Revealing…" : "🔍 Reveal Real Center"}
+          </button>
           <button className="ghost-btn" type="button" onClick={createHold} disabled={creatingHold || !sessionId}>
             {creatingHold ? "Creating hold..." : "Create Hold"}
           </button>
