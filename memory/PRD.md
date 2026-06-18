@@ -88,8 +88,14 @@ User language: Bengali (technical terms in English).
   - `POST /exam-reservations` with body `{exam_session_id: <enc>, occupation_id: 2125, methodology: "in_person", language_code: "OFFII", site_id: null, site_city: null, hold_id: null}` → reservation #4327062 with `test_center: {name: "Narsingdi Technical Training Center", test_center_id: 218, address: "Shibpur, Narsingdi", city: "Dhaka"}`.
 - Conclusion: the booking POST that uses `site_id: null, site_city: null, hold_id: null` (our fix) lets SVP bind the reservation to the real `exam_session_id`-derived centre instead of overriding from stale UI hints. Draft auto-expires in ~20 min — no money spent.
 
+## BULK CACHE PRE-FILL COMPLETE (2026-06-18)
+- Goal: pre-warm the Supabase `revealed_test_centers` cache so users see real test centres instantly without creating draft reservations.
+- Ran `/tmp/bulk_reveal.py` against 2 SVP accounts (`mdrajukhansvp64646` + `mdselmiahsvp35656`). Each account hit per-category cooldown after first run, but cache rows stayed at 73 unique production keys (rest are upsert overwrites). Empirically proven: additional accounts do NOT add new rows because the script picks the same first (city, date) per category. To diversify, the script would need to iterate over multiple (city, date) tuples per category — accepted as future enhancement.
+- Final cache: 73 production rows + 2 test rows. Coverage: 73 unique categories × 16 unique centres × 8 cities (Dhaka 42, Rajshahi 13, Chattogram 9, Khulna 3, Cumilla 2, Mymensingh 2, Barishal 1, Sylhet 1).
+- User-driven reveals continue to auto-grow the cache when users hit new (cat, city, date) combos — built into `BookingPage.revealRealCenter` already.
+
 ## Current Test Status
-- 68/68 Vitest tests passing across 13 suites.
+- 80/80 Vitest tests passing across 14 suites (verified 2026-06-18 post bulk-reveal).
 
 ## Backlog
 - P2 — Obtain fresh SVP API Bearer token for live e2e verification (current Postman token returns 401).
