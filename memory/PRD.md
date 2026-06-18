@@ -36,7 +36,18 @@ User language: Bengali (technical terms in English).
 - 2026-02 — BookingPage `createHold` now sends ONLY the selected `exam_session_id` (was sending every session in the city). Regression test: `BookingPage.create-hold.test.ts`.
 - 2026-02 — **BookingPage new-booking POST now mirrors the official SVP frontend confirm step**: `site_id: null`, `site_city: null`, `hold_id: null`. Previously stale UI fallbacks (e.g. `site_id: 1` for Dhaka) were forwarded and SVP used them as an override, causing the reservation to land at a DIFFERENT centre in the same city. Captured via network trace of `svp-international.pacc.sa`. Regression test: `BookingPage.reservation-payload.test.ts`.
 
-## LIVE PROOF OF BOOKING FIX (2026-06-18, real SVP session)
+## LIVE FULL E2E BOOKING VERIFIED VIA UI (2026-06-18, OTP 084090)
+- After applying the encrypted-session-id fix, drove the actual `/exam/booking` UI end-to-end via Playwright (Access USER → SVP token injected → real booking flow):
+  - Occupation: Aircraft Cleaning Worker (id 2125, cat 160) → City: Dhaka → Date: 2026-06-20.
+  - "Create Hold" → SUCCESS: Hold #3928810, numeric session 1556652 (resolved by SVP from encrypted token).
+  - "Confirm Booking" → POST body: `{exam_session_id: "hTS+8tmzew==--lKfa15sym7ZkyakH--dbQXMTQnNYSF/ZSjGTsU4w==", occupation_id: 2125, methodology: "in_person", language_code: "OFFII", site_id: null, site_city: null, hold_id: null}` → SUCCESS: Reservation #4327192 (HTTP 200).
+  - UI shows: "Reservation confirmed: #4327192", Hold ID: 3928810, Booking No: 4327192.
+- Third attempt (curl) blocked by SVP cooldown: `HTTP 422 — "You cannot proceed with booking now, please try again in 11 minutes"` — confirms SVP enforces per-category quota AFTER successful reservations (i.e. our 2 prior reservations counted).
+- BookingPage NEW fixes added this session:
+  - `createHold` now passes the raw `sessionId` string through to `/temporary-seats` when it isn't a pure positive integer. Previously, encrypted tokens like `g/8sT/c51g==--...` were coerced via `Number()` → NaN, breaking holds with "No valid exam session selected for hold creation".
+  - `bookReservation` now sends `exam_session_id` as the raw string when encrypted (previously `Number(sessionId)` → NaN → JSON `null` → SVP HTTP 400). Reschedule path got the same treatment.
+  - Regression suite `BookingPage.encrypted-session-id.test.ts` (6 tests): encrypted passthrough, numeric coercion, empty rejection, JSON serialization round-trip, and a snapshot of the OLD buggy behaviour for documentation.
+- Total: **62/62 Vitest tests pass** across 12 suites.
 - Logged into live `llwquxmlsdmdtmmktqqe.supabase.co` (Supabase project that hosts the live svp-proxy/svp-auth functions). Updated `/app/frontend/.env` accordingly. Created Access Control USER `e1-verifier@example.com / E1Verify#2026` (ACTIVE).
 - Real SVP OTP login: `mdrahadulislamsvp55445@yopmail.com` → OTP `095063` → SVP access token (15-min) obtained via `/svp-auth/otp-verify`.
 - LIVE EVIDENCE — pre-booking SVP responses hide the real centre exactly as PRD warns:
@@ -47,7 +58,7 @@ User language: Bengali (technical terms in English).
 - Conclusion: the booking POST that uses `site_id: null, site_city: null, hold_id: null` (our fix) lets SVP bind the reservation to the real `exam_session_id`-derived centre instead of overriding from stale UI hints. Draft auto-expires in ~20 min — no money spent.
 
 ## Current Test Status
-- 56/56 Vitest tests passing across 11 suites.
+- 62/62 Vitest tests passing across 12 suites.
 
 ## Backlog
 - P2 — Obtain fresh SVP API Bearer token for live e2e verification (current Postman token returns 401).

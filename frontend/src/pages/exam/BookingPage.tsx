@@ -546,12 +546,18 @@ export default function BookingPage() {
     // Holding the whole city would let SVP confirm a different test center
     // when the booking POST is made with hold_id, because the hold covers
     // multiple distinct centers in the same city.
-    const selectedSessionId = Number(sessionId);
-    if (!Number.isFinite(selectedSessionId) || selectedSessionId <= 0) {
-      setError("No valid exam session selected for hold creation");
-      return;
-    }
-    const sessionIds = [selectedSessionId];
+    //
+    // NOTE: `sessionId` may be EITHER a numeric id (e.g. 1556652) or an
+    // encrypted SVP token (e.g. "ns6AFwlBsA==--...--..."). Both are accepted
+    // by the SVP /temporary-seats endpoint — the server resolves the
+    // encrypted token to its numeric session id and returns the numeric id
+    // in the response. Send the raw string so encrypted tokens still work.
+    const raw = String(sessionId).trim();
+    if (!raw) { setError("No exam session selected for hold creation"); return; }
+    const asNumber = Number(raw);
+    const sessionIds: Array<string | number> = [
+      Number.isFinite(asNumber) && asNumber > 0 && String(asNumber) === raw ? asNumber : raw,
+    ];
     setCreatingHold(true); setError(""); setStatus("");
     try {
       const data = await api("/temporary-seats", { method: "POST", body: { exam_session_id: sessionIds, methodology: methodology || "in_person" } });
@@ -593,11 +599,16 @@ export default function BookingPage() {
       if (isReschedule) {
         // Use the dedicated reschedule endpoint
         setStatus("Rescheduling reservation...");
+        // sessionId may be encrypted SVP token or numeric — pass numeric when valid, else raw.
+        const sidAsNumber = Number(sessionId);
+        const sidForBody: string | number = Number.isFinite(sidAsNumber) && sidAsNumber > 0 && String(sidAsNumber) === String(sessionId)
+          ? sidAsNumber
+          : String(sessionId);
         const data = await api(`/exam-reservations/${encodeURIComponent(oldReservationId)}/reschedule`, {
           method: "POST",
           body: {
             id: Number(oldReservationId),
-            exam_session_id: Number(sessionId),
+            exam_session_id: sidForBody,
             language_code: rescheduleLanguageCode,
           },
         });
@@ -618,9 +629,19 @@ export default function BookingPage() {
         // Likewise, `hold_id` is left null here so the reservation binds purely to
         // the chosen `exam_session_id` (the temporary seat hold above is informational
         // only — SVP's own UI never forwards hold_id into the reservation POST).
+        //
+        // `sessionId` may be either a numeric SVP id or an encrypted SVP token
+        // (the live `/exam-sessions` listing returns encrypted tokens as `id`).
+        // Both are accepted by SVP — DO NOT coerce via Number() blindly or
+        // encrypted tokens become NaN → null and SVP returns HTTP 400.
+        const sidAsNumber = Number(sessionId);
+        const examSessionIdForBody: string | number =
+          Number.isFinite(sidAsNumber) && sidAsNumber > 0 && String(sidAsNumber) === String(sessionId)
+            ? sidAsNumber
+            : String(sessionId);
         const data: any = await api("/exam-reservations", {
           method: "POST", body: {
-            exam_session_id: Number(sessionId), occupation_id: Number(selectedOccupationId),
+            exam_session_id: examSessionIdForBody, occupation_id: Number(selectedOccupationId),
             methodology: methodology || "in_person", language_code: effectiveLanguageCode,
             site_id: null, site_city: null, hold_id: null,
           },
