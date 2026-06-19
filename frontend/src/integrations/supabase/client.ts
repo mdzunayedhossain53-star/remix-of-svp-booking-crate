@@ -5,6 +5,13 @@ import type { Database } from './types';
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
+// Print active Supabase URL on boot so deployments can be diagnosed
+// without inspecting bundled JS. Logs once at module init time.
+if (typeof window !== "undefined") {
+  // eslint-disable-next-line no-console
+  console.info(`[supabase] connecting to ${SUPABASE_URL}`);
+}
+
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";
 
