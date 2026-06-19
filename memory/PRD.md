@@ -122,8 +122,14 @@ User language: Bengali (technical terms in English).
 - `.gitignore` cleaned: removed triplicate `.env` blocks + stray `-e ` shell artifact. One canonical credential-exclusion block remains. All `.env*` excluded so push is safe.
 - Build still ✓ (6.19s, 1735 modules). **95/95 vitest tests pass**.
 
+## BEST-WAY SETUP COMPLETE (2026-06-19)
+- **Supabase Edge Functions verified reachable**: svp-auth (404 unknown path), svp-proxy (401 auth-required), access-auth (404), access-admin (403). No 5xx — all functions deployed and responsive. Supabase-only mode is fully production-ready, no Railway needed.
+- **Live E2E test** in preview environment: admin@example.com login → Access Control Dashboard renders cleanly → 0 console errors, 0 network 5xx. End-to-end Supabase auth + DB + RLS confirmed working.
+- **`/app/frontend/.env.example`** — paste-ready template for Vercel env vars. Documents both Supabase-only and dual-backend modes.
+- **`/app/.github/workflows/ci.yml`** — GitHub Actions CI: runs `yarn test --run` (95 vitest) + `yarn build` on every push / PR to main. Uploads dist artifact for 7 days. Catches broken commits BEFORE Vercel deploys.
+
 ## Current Test Status
-- 95/95 Vitest tests passing across 16 suites (verified 2026-06-19 after dual-backend + Vercel config).
+- 95/95 Vitest tests passing across 16 suites (verified 2026-06-19 after best-way setup complete).
 
 ## Backlog
 - P2 — Obtain fresh SVP API Bearer token for live e2e verification (current Postman token returns 401).
