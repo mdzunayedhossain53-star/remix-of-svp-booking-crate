@@ -160,10 +160,16 @@ User language: Bengali (technical terms in English).
   - Growth: 73 → 194 rows (**+121, 166% increase**)
 - Effect on production: any user now hitting a (cat, city, date) combination already in this cache gets the centre name INSTANTLY — no draft reservation, no SVP cooldown trip, no 10-second delay.
 
+## TEST_CENTERS TABLE CLEARED (2026-06-19)
+- User truncated `test_centers` table via Supabase SQL Editor — 44 rows → 0 rows. The table was being used as an admin-override fallback lookup in `BookingPage.tsx` (lines 326, 359, 435, 461, 489) but is now obsolete because:
+  - Primary source for centre name is the SVP API response (`test_center.test_center_name`).
+  - Cache layer (`revealed_test_centers`, 196 rows) covers everything the admin overrides used to.
+- Post-truncate verification: app fully functional, access-control login OK, SVP signin page renders, 0 console errors. No FK breakage — `section_center_rules` / `exam_session_centers` tables don't exist in this Supabase project.
+
 ## Current Test Status
 - 95/95 Vitest tests passing across 16 suites.
 - Production live verification on Vercel: 8/8 flow checks pass.
-- Bulk cache pre-fill: 121 new (cat × city × date) keys written to Supabase by 2 parallel deep-reveal processes with zero cooldown failures.
+- Cache: 196 rows in `revealed_test_centers`, 0 rows in (deprecated) `test_centers`.
 
 ## Backlog
 - P2 — Obtain fresh SVP API Bearer token for live e2e verification (current Postman token returns 401).
