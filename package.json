@@ -2,9 +2,9 @@
   "name": "root",
   "private": true,
   "scripts": {
-    "dev": "cd frontend && npx vite --port 8080 --host",
-    "build": "cd frontend && npx vite build",
-    "build:dev": "cd frontend && npx vite build --mode development",
-    "preview": "cd frontend && npx vite preview"
+    "dev": "npm --prefix frontend exec -- vite --port 8080 --host",
+    "build": "npm --prefix frontend exec -- vite build",
+    "build:dev": "npm --prefix frontend exec -- vite build --mode development",
+    "preview": "npm --prefix frontend exec -- vite preview"
   }
 }
