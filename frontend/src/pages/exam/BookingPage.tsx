@@ -10,10 +10,8 @@ import {
   buildCenterOptions, buildCityOptions, buildDateOptions, buildCalendarDays,
   formatDateLabel, detectBookingMode, resolveSessionCenter, SectionCenterRule,
 } from "@/lib/booking-utils";
-import { getCachedCenter, setCachedCenter, CachedCenter } from "@/lib/revealed-centers-cache";
+import { getCachedCenter, CachedCenter } from "@/lib/revealed-centers-cache";
 import { deepFindTestCenter as deepFindTestCenterShared, RevealedCenter as RevealedCenterShared } from "@/lib/deep-find-test-center";
-import { autoRevealMissingCenters } from "@/lib/auto-reveal-cache-misses";
-import { toast } from "@/components/ui/sonner";
 
 // Walks a nested SVP reservation/session response looking for the
 // authoritative `test_center` object (the one with a real
@@ -22,6 +20,110 @@ import { toast } from "@/components/ui/sonner";
 // so we search every level and pick the first one that carries a real id.
 export type RevealedCenter = RevealedCenterShared;
 export const deepFindTestCenter = deepFindTestCenterShared;
+
+function uniqueKeys(values: Array<string | number | null | undefined>): string[] {
+  return Array.from(new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean)));
+}
+
+function sessionCacheKeyCandidates(
+  selectedSessionId: string,
+  selectedSession: any,
+  sessionDetail: any,
+  categoryId = "",
+  city = "",
+  examDate = ""
+): string[] {
+  const legacyCategoryDateKey = categoryId && city && examDate
+    ? `cat-${String(categoryId).trim()}|city-${String(city).trim().toLowerCase()}|date-${String(examDate).trim()}`
+    : "";
+  return uniqueKeys([
+    selectedSessionId,
+    getSessionId(selectedSession),
+    selectedSession?.exam_session_id,
+    selectedSession?.session_id,
+    getSessionId(sessionDetail),
+    sessionDetail?.exam_session_id,
+    sessionDetail?.session_id,
+    legacyCategoryDateKey,
+  ]);
+}
+
+function getResponseExamSession(response: any): any {
+  return (
+    response?.exam_session ||
+    response?.data?.exam_session ||
+    response?.reservation?.exam_session ||
+    response?.data?.reservation?.exam_session ||
+    null
+  );
+}
+
+function numericSessionIds(items: any[]): number[] {
+  return Array.from(new Set(items
+    .map((item) => Number(getSessionId(item) || item?.exam_session_id || item?.session_id))
+    .filter((n) => Number.isFinite(n) && n > 0)));
+}
+
+async function fetchExamSessionCenterMappings(ids: number[]): Promise<Array<{ exam_session_id: number; site_id: number }>> {
+  if (!ids.length) return [];
+  try {
+    const { data, error } = await supabase
+      .from("exam_session_centers" as any)
+      .select("exam_session_id, site_id")
+      .in("exam_session_id", ids);
+    if (!error && data) {
+      return (data as any[]).map((row) => ({
+        exam_session_id: Number(row.exam_session_id),
+        site_id: Number(row.site_id),
+      })).filter((row) => Number.isFinite(row.exam_session_id) && Number.isFinite(row.site_id));
+    }
+  } catch {}
+
+  try {
+    const { data, error } = await supabase
+      .from("exam_session_test_centers" as any)
+      .select("exam_session_id, test_center_id")
+      .in("exam_session_id", ids);
+    if (error || !data) return [];
+    return (data as any[]).map((row) => ({
+      exam_session_id: Number(row.exam_session_id),
+      site_id: Number(row.test_center_id),
+    })).filter((row) => Number.isFinite(row.exam_session_id) && Number.isFinite(row.site_id));
+  } catch {
+    return [];
+  }
+}
+
+async function fetchTestCenterRows(siteIds: number[]): Promise<Array<{ site_id: number; name: string }>> {
+  const ids = Array.from(new Set(siteIds.filter((n) => Number.isFinite(n) && n > 0)));
+  if (!ids.length) return [];
+  try {
+    const { data, error } = await supabase
+      .from("test_centers" as any)
+      .select("site_id, name")
+      .in("site_id", ids);
+    if (!error && data) {
+      return (data as any[]).map((row) => ({
+        site_id: Number(row.site_id),
+        name: String(row.name || "").trim(),
+      })).filter((row) => Number.isFinite(row.site_id) && row.name);
+    }
+  } catch {}
+
+  try {
+    const { data, error } = await supabase
+      .from("test_centers" as any)
+      .select("test_center_id, name")
+      .in("test_center_id", ids);
+    if (error || !data) return [];
+    return (data as any[]).map((row) => ({
+      site_id: Number(row.test_center_id),
+      name: String(row.name || "").trim(),
+    })).filter((row) => Number.isFinite(row.site_id) && row.name);
+  } catch {
+    return [];
+  }
+}
 
 
 export default function BookingPage() {
@@ -67,7 +169,6 @@ export default function BookingPage() {
   const [occupationSearch, setOccupationSearch] = useState("");
   const [isOccupationOpen, setIsOccupationOpen] = useState(false);
   const [revealedCenter, setRevealedCenter] = useState<RevealedCenter | null>(null);
-  const [revealing, setRevealing] = useState(false);
   const [revealMessage, setRevealMessage] = useState("");
   const occupationRef = useRef<HTMLDivElement>(null);
 
@@ -89,7 +190,27 @@ export default function BookingPage() {
     () => cityFilteredSessions.map((item) => resolveSessionCenter(item, testCenterMap, centerNameToSiteId, sessionIdToSiteId, sectionRules)),
     [cityFilteredSessions, testCenterMap, centerNameToSiteId, sessionIdToSiteId, sectionRules]
   );
-  const centerOptions = useMemo(() => {
+  const selectedSession = useMemo(
+    () => sessionsWithResolvedCenters.find((item) => String(getSessionId(item)) === String(sessionId)) || null,
+    [sessionsWithResolvedCenters, sessionId]
+  );
+  const verifiedSelectedSession = useMemo(() => {
+    if (!selectedSession || !revealedCenter || !sessionId) return selectedSession;
+    const revealedSiteId = String(revealedCenter.id || "");
+    return {
+      ...selectedSession,
+      ...(revealedSiteId ? { site_id: revealedSiteId } : {}),
+      test_center: {
+        ...(selectedSession?.test_center || {}),
+        name: revealedCenter.name,
+        test_center_name: revealedCenter.name,
+        ...(revealedCenter.city ? { city: revealedCenter.city, test_center_city: revealedCenter.city } : {}),
+        ...(revealedCenter.address ? { address: revealedCenter.address } : {}),
+        ...(revealedSiteId ? { id: revealedSiteId, site_id: revealedSiteId, test_center_id: revealedSiteId } : {}),
+      },
+    };
+  }, [selectedSession, revealedCenter, sessionId]);
+  const baseCenterOptions = useMemo(() => {
     const options = buildCenterOptions(sessionsWithResolvedCenters);
     // Enrich with real test center names from the map
     return options.map((opt) => ({
@@ -97,6 +218,16 @@ export default function BookingPage() {
       name: testCenterMap.get(opt.siteId) || opt.name,
     }));
   }, [sessionsWithResolvedCenters, testCenterMap]);
+  const centerOptions = useMemo(() => {
+    if (revealedCenter && sessionId) {
+      return [{
+        siteId: String(revealedCenter.id || ""),
+        name: revealedCenter.name,
+        city: revealedCenter.city || selectedCity,
+      }].filter((item) => item.siteId && item.name);
+    }
+    return baseCenterOptions;
+  }, [baseCenterOptions, revealedCenter, sessionId, selectedCity]);
   const getResolvedSessionCenterName = (item: any) => {
     // SVP-first: if the session already carries its own real test_center_name
     // (new SVP shape), use that. This guarantees per-session correctness even
@@ -110,14 +241,10 @@ export default function BookingPage() {
     }
     return getSessionCenterName(item);
   };
-  const filteredSessions = useMemo(
-    () => selectedCenterId ? sessionsWithResolvedCenters.filter((item) => getCenterKey(item) === String(selectedCenterId)) : sessionsWithResolvedCenters,
-    [sessionsWithResolvedCenters, selectedCenterId]
-  );
-  const selectedSession = useMemo(
-    () => filteredSessions.find((item) => String(getSessionId(item)) === String(sessionId)) || null,
-    [filteredSessions, sessionId]
-  );
+  const filteredSessions = useMemo(() => {
+    if (revealedCenter && sessionId && verifiedSelectedSession) return [verifiedSelectedSession];
+    return selectedCenterId ? sessionsWithResolvedCenters.filter((item) => getCenterKey(item) === String(selectedCenterId)) : sessionsWithResolvedCenters;
+  }, [sessionsWithResolvedCenters, selectedCenterId, revealedCenter, sessionId, verifiedSelectedSession]);
   const calendarBaseMonth = calendarMonth || (availableDate ? availableDate.slice(0, 7) : normalizeDateValue(new Date().toISOString()).slice(0, 7));
   const calendarCursorDate = useMemo(() => new Date(`${calendarBaseMonth}-01T00:00:00`), [calendarBaseMonth]);
   const calendarYear = calendarCursorDate.getFullYear();
@@ -166,35 +293,6 @@ export default function BookingPage() {
         }
         const unique = all;
         setOccupations(unique.map(normalizeOccupation));
-        // 🤖 Auto-reveal cache misses in the background (fire-and-forget).
-        // Runs once per browser tab session — see auto-reveal-cache-misses.ts.
-        // Caps at 15 reveals with 10s spacing so we never trigger SVP's
-        // per-category cooldown for the active user.
-        if (unique.length > 0) {
-          void autoRevealMissingCenters({
-            onReveal: (centre, count) => {
-              // Mini live tick — keep it subtle but show progress.
-              if (count === 1) {
-                toast.message("🤖 Smart cache warming up", {
-                  description: `Discovered ${centre.name} (${centre.city}). Working in the background…`,
-                });
-              }
-            },
-            onComplete: (result) => {
-              if (result.succeeded > 0) {
-                const noun = result.succeeded === 1 ? "centre" : "centres";
-                toast.success(`🤖 ${result.succeeded} new ${noun} added to community cache`, {
-                  description: result.stoppedReason === "rate_limit"
-                    ? "Paused early because of SVP cooldown — will continue on your next visit."
-                    : "Future bookings for these slots will be instant — no draft needed.",
-                  duration: 6000,
-                  // data-testid attached via id so QA/testing-agent can target the toast container
-                  id: "auto-reveal-complete-toast",
-                });
-              }
-            },
-          }).catch(() => { /* silent background failure */ });
-        }
       } catch (err: any) { setError(err?.message || "Failed to load occupations"); }
       finally { setLoadingOccupations(false); }
     })();
@@ -307,12 +405,9 @@ export default function BookingPage() {
     if (!sessions.length) return;
     let active = true;
     (async () => {
-      const ids = Array.from(new Set(sessions.map((s: any) => Number(getSessionId(s))).filter((n) => Number.isFinite(n) && n > 0)));
+      const ids = numericSessionIds(sessions);
       if (!ids.length) return;
-      const { data: maps } = await supabase
-        .from("exam_session_centers")
-        .select("exam_session_id, site_id")
-        .in("exam_session_id", ids);
+      const maps = await fetchExamSessionCenterMappings(ids);
       if (!active || !maps?.length) return;
       const newSessionMap = new Map(sessionIdToSiteId);
       let sessionMapChanged = false;
@@ -322,10 +417,7 @@ export default function BookingPage() {
         if (newSessionMap.get(k) !== v) { newSessionMap.set(k, v); sessionMapChanged = true; }
       });
       const siteIds = Array.from(new Set(maps.map((r: any) => Number(r.site_id))));
-      const { data: centers } = await supabase
-        .from("test_centers")
-        .select("site_id, name")
-        .in("site_id", siteIds);
+      const centers = await fetchTestCenterRows(siteIds);
       if (!active) return;
       const newTcMap = new Map(testCenterMap);
       const newNameMap = new Map(centerNameToSiteId);
@@ -343,6 +435,43 @@ export default function BookingPage() {
     })();
     return () => { active = false; };
   }, [sessions]);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const ids = numericSessionIds([sessionDetail]);
+      if (!ids.length) return;
+      const maps = await fetchExamSessionCenterMappings(ids);
+      if (!active || !maps.length) return;
+      const newSessionMap = new Map(sessionIdToSiteId);
+      let sessionMapChanged = false;
+      maps.forEach((row: any) => {
+        const k = String(row.exam_session_id);
+        const v = String(row.site_id);
+        if (newSessionMap.get(k) !== v) { newSessionMap.set(k, v); sessionMapChanged = true; }
+        if (sessionId && newSessionMap.get(String(sessionId)) !== v) {
+          newSessionMap.set(String(sessionId), v);
+          sessionMapChanged = true;
+        }
+      });
+      const centers = await fetchTestCenterRows(maps.map((row) => Number(row.site_id)));
+      if (!active) return;
+      const newTcMap = new Map(testCenterMap);
+      const newNameMap = new Map(centerNameToSiteId);
+      let tcChanged = false;
+      let nameChanged = false;
+      centers.forEach((row: any) => {
+        const siteKey = `site:${row.site_id}`;
+        if (newTcMap.get(siteKey) !== row.name) { newTcMap.set(siteKey, row.name); tcChanged = true; }
+        const nk = String(row.name || "").trim().toLowerCase();
+        if (nk && newNameMap.get(nk) !== String(row.site_id)) { newNameMap.set(nk, String(row.site_id)); nameChanged = true; }
+      });
+      if (sessionMapChanged) setSessionIdToSiteId(newSessionMap);
+      if (tcChanged) setTestCenterMap(newTcMap);
+      if (nameChanged) setCenterNameToSiteId(newNameMap);
+    })();
+    return () => { active = false; };
+  }, [sessionDetail, sessionIdToSiteId, testCenterMap, centerNameToSiteId]);
 
   // Load all section center rules once. Also pre-load test_centers names for rule sites.
   useEffect(() => {
@@ -443,40 +572,7 @@ export default function BookingPage() {
         });
       }
 
-      // 3. Final fallback: query local DB by city for ANY session whose name
-      //    still hasn't resolved — covers SVP responses where site_id is null
-      //    AND where test_center carries a random/unmapped id. All sessions
-      //    sharing the same city resolve to that city's canonical center name.
-      const cityMissing = Array.from(new Set(
-        sessions
-          .filter((s: any) => {
-            const key = String(getCenterKey(s));
-            const sessionKey = `session:${getSessionId(s)}`;
-            return !newMap.has(sessionKey) && (!key || !newMap.has(key));
-          })
-          .map((s: any) => String(getSessionSiteCity(s)).trim())
-          .filter(Boolean)
-      ));
-      if (cityMissing.length) {
-        const { data } = await supabase.from("test_centers").select("name, city").in("city", cityMissing);
-        const byCity = new Map<string, string>();
-        data?.forEach((row: any) => {
-          const c = String(row.city || "").trim().toLowerCase();
-          if (c && !byCity.has(c)) byCity.set(c, row.name);
-        });
-        sessions.forEach((s: any) => {
-          const key = String(getCenterKey(s));
-          const sessionKey = `session:${getSessionId(s)}`;
-          if (newMap.has(sessionKey)) return;
-          const c = String(getSessionSiteCity(s)).trim().toLowerCase();
-          const name = byCity.get(c);
-          if (!name) return;
-          if (!newMap.has(sessionKey)) { newMap.set(sessionKey, name); changed = true; }
-          if (key && !newMap.has(key)) { newMap.set(key, name); changed = true; }
-        });
-      }
-
-      // 4. Build a name -> site_id lookup from local DB for every resolved
+      // 3. Build a name -> site_id lookup from local DB for every resolved
       //    center name. This lets us stamp site_id onto sessions even when
       //    SVP returns site_id=null (the API just gives us the name).
       const resolvedNames = Array.from(new Set(
@@ -524,31 +620,46 @@ export default function BookingPage() {
     if (codes[0]?.code || codes[0]?.language_code) setLanguageCode(String(codes[0].code || codes[0].language_code));
   }, [selectedSession]);
 
-  // Stable cache key for the revealed-centers cache.
-  //
-  // SVP rotates the encrypted exam_session_id token on EVERY request,
-  // so we cannot use it as a cache key (different per page load). The
-  // tuple `(category_id, city, exam_date)` uniquely identifies one
-  // session in our test data, and the SVP server reuses the same real
-  // test centre for that tuple, so we cache by the tuple instead.
+  // Session-scoped cache key for the revealed-centers cache.
+  // A city/date can expose multiple exam sessions and real centres, so the
+  // verified centre must stay bound to the exact selected session.
   const sessionCacheKey = useMemo(() => {
-    if (!categoryId || !selectedCity || !availableDate) return "";
-    return `cat-${categoryId}|city-${String(selectedCity).toLowerCase()}|date-${availableDate}`;
-  }, [categoryId, selectedCity, availableDate]);
+    return sessionId ? String(sessionId) : "";
+  }, [sessionId]);
+  const sessionCacheKeys = useMemo(
+    () => sessionCacheKeyCandidates(
+      sessionCacheKey,
+      selectedSession,
+      sessionDetail,
+      categoryId,
+      selectedCity,
+      availableDate
+    ),
+    [sessionCacheKey, selectedSession, sessionDetail, categoryId, selectedCity, availableDate]
+  );
+  const sessionCacheKeySignature = sessionCacheKeys.join("\n");
 
   // 🔍 Auto-resolve the REAL test centre from cache (localStorage first,
   // then Supabase shared cache) whenever the selected session changes.
   // If a fresh cached value exists we display it instantly with NO new
-  // draft reservation. The "🔍 Reveal Real Center" button stays available
-  // for sessions that nobody has revealed before.
+  // draft reservation. Booking users only read previously verified values.
   useEffect(() => {
     let alive = true;
-    if (!sessionCacheKey || !sessionId) { setRevealedCenter(null); setRevealMessage(""); return; }
-    // Don't blow away an in-progress reveal or a freshly-confirmed booking.
-    if (revealing) return;
+    if (!sessionCacheKeys.length || !sessionId) {
+      setRevealedCenter(null);
+      setRevealMessage("");
+      return;
+    }
+    setRevealedCenter(null);
+    setRevealMessage("");
     (async () => {
-      const cached = await getCachedCenter(sessionCacheKey);
-      if (!alive || !cached) return;
+      let cached: CachedCenter | null = null;
+      for (const key of sessionCacheKeys) {
+        cached = await getCachedCenter(key);
+        if (cached) break;
+      }
+      if (!alive) return;
+      if (!cached) return;
       setRevealedCenter({ name: cached.name, id: cached.id, address: cached.address, city: cached.city });
       const ageDays = Math.round((Date.now() - Date.parse(cached.revealedAt)) / 86_400_000);
       const ageLabel = ageDays <= 0 ? "today" : ageDays === 1 ? "1 day ago" : `${ageDays} days ago`;
@@ -556,7 +667,7 @@ export default function BookingPage() {
       setRevealMessage(`Loaded from ${where} (last verified ${ageLabel}). No new draft created.`);
     })();
     return () => { alive = false; };
-  }, [sessionCacheKey, sessionId, revealing]);
+  }, [sessionCacheKey, sessionCacheKeySignature, sessionId]);
 
   // Fetch session detail (status + seats) for the selected session
   useEffect(() => {
@@ -649,92 +760,6 @@ export default function BookingPage() {
       setStatus(nextHoldId ? `Hold created: #${nextHoldId}` : "Hold created");
     } catch (err: any) { setError(err?.message || "Failed to create hold"); }
     finally { setCreatingHold(false); }
-  }
-
-  // 🔍 Reveal real test centre BEFORE finalising payment.
-  //
-  // SVP hides the real centre identity in /exam-sessions (it returns the
-  // placeholder "<City> Center" with id=null). The ONLY way to read the
-  // real centre pre-payment is to create a draft reservation: SVP attaches
-  // the real `test_center` object to the reservation response. The draft
-  // auto-expires within ~20 minutes (no money charged, no payment record).
-  //
-  // Flow: hold (encrypted token accepted) → reservation POST (with our
-  // null-site_id payload) → deepFindTestCenter on the response → display.
-  async function revealRealCenter() {
-    if (!sessionId) { setRevealMessage("Select an exam session first."); return; }
-    if (!selectedOccupationId) { setRevealMessage("Select an occupation first."); return; }
-    const sessionCodes = getPrometricCodes(selectedSession);
-    const effectiveLanguageCode = languageCode || selectedOccupation?.languageCodes?.[0]?.code || sessionCodes?.[0]?.code || sessionCodes?.[0]?.language_code || "";
-    if (!effectiveLanguageCode) { setRevealMessage("Select a language first."); return; }
-
-    const raw = String(sessionId).trim();
-    const asNumber = Number(raw);
-    const examSessionIdForBody: string | number =
-      Number.isFinite(asNumber) && asNumber > 0 && String(asNumber) === raw ? asNumber : raw;
-
-    setRevealing(true); setRevealMessage(""); setRevealedCenter(null);
-    try {
-      // 1) Hold (informational — required by SVP business rules even though
-      //    we never forward hold_id into the reservation POST).
-      try {
-        await api("/temporary-seats", {
-          method: "POST",
-          body: { exam_session_id: [examSessionIdForBody], methodology: methodology || "in_person" },
-        });
-      } catch {
-        // hold may already exist for this session — that is OK, proceed.
-      }
-
-      // 2) Draft reservation with the SVP-frontend-parity payload. This is
-      //    the same body bookReservation() uses, so the revealed centre is
-      //    exactly the one a real booking would land in.
-      const data: any = await api("/exam-reservations", {
-        method: "POST",
-        body: {
-          exam_session_id: examSessionIdForBody,
-          occupation_id: Number(selectedOccupationId),
-          methodology: methodology || "in_person",
-          language_code: effectiveLanguageCode,
-          site_id: null, site_city: null, hold_id: null,
-        },
-      });
-
-      const centre = deepFindTestCenter(data);
-      if (!centre) {
-        setRevealMessage("Could not extract the real test centre from the SVP response. It may not be assigned yet — try again in a moment.");
-        return;
-      }
-      setRevealedCenter(centre);
-      // Persist to both cache layers so the next visit to this session
-      // (same user OR any user via Supabase) does not need to create a
-      // draft. setCachedCenter is fire-and-forget on the Supabase side.
-      //
-      // We key by the (category, city, date) tuple — NOT by the encrypted
-      // exam_session_id, because SVP rotates that token on every request.
-      if (sessionCacheKey) setCachedCenter(sessionCacheKey, centre);
-      const nextReservationId = extractId(data, ["id", "reservation_id", "exam_reservation_id"]);
-      if (nextReservationId) {
-        // Reveal creates a REAL (unpaid) reservation, so surface it as the
-        // booking number — "Confirm Booking" would otherwise create a
-        // duplicate and SVP would reject it with HTTP 422. The user now
-        // sees `Booking No: #N` immediately and can move straight to
-        // payment.
-        setReservationId(String(nextReservationId));
-        setStatus(`Reservation drafted via reveal: #${nextReservationId}. Pay within ~20 min to finalize, or it auto-expires.`);
-        setRevealMessage(`Revealed via draft reservation #${nextReservationId} (auto-expires ~20 min, no payment taken).`);
-      }
-    } catch (err: any) {
-      const details = err?.data?.details || err?.details;
-      if (details?.errors?.reservation === "existing_reservation_for_category" ||
-          String(details?.errors?.reservation || "").toLowerCase().includes("existing")) {
-        setRevealMessage("You already have an active reservation for this category — cancel it first to reveal centres for new bookings.");
-      } else {
-        setRevealMessage(err?.message || "Failed to reveal real centre.");
-      }
-    } finally {
-      setRevealing(false);
-    }
   }
 
   async function bookReservation() {
@@ -992,14 +1017,14 @@ export default function BookingPage() {
           ) : null}
           <div className="field-block">
             <span>Test Center *</span>
-            <select value={selectedCenterId} onChange={(e) => setSelectedCenterId(e.target.value)} disabled={!centerOptions.length}>
+            <select aria-label="Test Center *" value={selectedCenterId} onChange={(e) => setSelectedCenterId(e.target.value)} disabled={!centerOptions.length}>
               <option value="">{loadingSessions ? "Loading centers..." : "Select test center"}</option>
               {centerOptions.map((item) => <option key={item.siteId} value={item.siteId}>{item.name} (Site #{item.siteId})</option>)}
             </select>
           </div>
           <div className="field-block">
             <span>Exam Session *</span>
-            <select value={sessionId} onChange={(e) => setSessionId(e.target.value)} disabled={!filteredSessions.length}>
+            <select aria-label="Exam Session *" value={sessionId} onChange={(e) => setSessionId(e.target.value)} disabled={!filteredSessions.length}>
               <option value="">{loadingSessions ? "Loading sessions..." : "Select session"}</option>
               {filteredSessions.map((item) => {
                 const sid = getSessionSiteId(item);
@@ -1041,8 +1066,7 @@ export default function BookingPage() {
           <div><span>Booking No:</span> <strong>{reservationId || "-"}</strong></div>
         </div>
 
-        {/* 🔍 Reveal Real Center — pre-booking real centre check. */}
-        {(revealedCenter || revealMessage || revealing) && (
+        {revealedCenter && (
           <div
             data-testid="reveal-real-center-panel"
             style={{
@@ -1061,8 +1085,7 @@ export default function BookingPage() {
                 : "#f9fafb",
             }}
           >
-            {revealing && <div style={{ fontSize: 13, color: "#475569" }}>Revealing real centre via draft reservation…</div>}
-            {revealedCenter && !revealing && (
+            {revealedCenter && (
               <>
                 <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: 0.4, color: "#15803d", marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
                   REAL TEST CENTRE
@@ -1091,7 +1114,7 @@ export default function BookingPage() {
                 )}
               </>
             )}
-            {revealMessage && !revealing && (
+            {revealMessage && (
               <div data-testid="reveal-real-center-message" style={{ fontSize: 12, color: "#475569", marginTop: revealedCenter ? 8 : 0 }}>
                 {revealMessage}
               </div>
@@ -1100,16 +1123,6 @@ export default function BookingPage() {
         )}
 
         <div className="actions-row">
-          <button
-            className="ghost-btn"
-            type="button"
-            onClick={revealRealCenter}
-            disabled={revealing || !sessionId || !selectedOccupationId}
-            data-testid="reveal-real-center-btn"
-            title="Creates an unpaid draft reservation (auto-expires ~20 min) just to read the centre SVP would assign."
-          >
-            {revealing ? "Revealing…" : "🔍 Reveal Real Center"}
-          </button>
           <button className="ghost-btn" type="button" onClick={createHold} disabled={creatingHold || !sessionId}>
             {creatingHold ? "Creating hold..." : "Create Hold"}
           </button>

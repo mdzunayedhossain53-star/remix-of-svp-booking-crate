@@ -53,8 +53,6 @@ beforeEach(() => {
   supabaseFromMock.mockImplementation(() => ({
     select: () => ({ in: async () => ({ data: [], error: null }) }),
   }));
-  // Speed: don't actually wait 10s between reveals in tests
-  vi.useFakeTimers();
 });
 
 describe("autoRevealMissingCenters", () => {
@@ -88,22 +86,22 @@ describe("autoRevealMissingCenters", () => {
         exam_sessions: [{ city: "Dhaka", start_date_in_browser_time_zone: "2026-07-01" }],
       });
     });
-    // For each of the 15 attempts: /exam-sessions then /temporary-seats then /exam-reservations
-    for (let i = 0; i < MAX_REVEALS_PER_SESSION; i++) {
+    // Expand each city/date into one concrete session.
+    for (let i = 0; i < 20; i++) {
       apiMock.mockResolvedValueOnce({ exam_sessions: [{ id: `enc-${i}` }] });
+    }
+    // For each of the 15 attempts: /temporary-seats then /exam-reservations.
+    for (let i = 0; i < MAX_REVEALS_PER_SESSION; i++) {
       apiMock.mockResolvedValueOnce({ id: 99999 }); // hold
       apiMock.mockResolvedValueOnce(realCentreReservationResponse(`c-${i}`));
     }
-    const promise = autoRevealMissingCenters();
-    // Fast-forward the 10s delays
-    await vi.runAllTimersAsync();
-    const r = await promise;
+    const r = await autoRevealMissingCenters({ revealDelayMs: 0 });
     expect(r.attempted).toBe(MAX_REVEALS_PER_SESSION);
     expect(r.succeeded).toBe(MAX_REVEALS_PER_SESSION);
     expect(setCachedMock).toHaveBeenCalledTimes(MAX_REVEALS_PER_SESSION);
-    // First setCachedCenter must use the cat-X|city-dhaka|... key
+    // First setCachedCenter must use the exact session key.
     const firstCall = setCachedMock.mock.calls[0];
-    expect(firstCall[0]).toMatch(/^cat-\d+\|city-dhaka\|date-2026-07-01$/);
+    expect(firstCall[0]).toBe("enc-0");
   });
 
   it("filters out cache hits before reveal", async () => {
@@ -113,7 +111,8 @@ describe("autoRevealMissingCenters", () => {
     apiMock.mockResolvedValueOnce({
       exam_sessions: [{ city: "Dhaka", start_date_in_browser_time_zone: "2026-07-01" }],
     });
-    // Supabase says this key is already cached
+    // Session expansion happens first, then Supabase says this session key is already cached.
+    apiMock.mockResolvedValueOnce({ exam_sessions: [{ id: "enc-cached" }] });
     supabaseFromMock.mockImplementation(() => ({
       select: () => ({
         in: async (_col: string, keys: string[]) => ({
@@ -125,9 +124,31 @@ describe("autoRevealMissingCenters", () => {
     const r = await autoRevealMissingCenters();
     expect(r.stoppedReason).toBe("no_candidates");
     expect(r.attempted).toBe(0);
-    // /exam-sessions must NOT have been called (no reveal attempted)
+    // /exam-reservations must NOT have been called (no reveal attempted)
     const reservationCalls = apiMock.mock.calls.filter((c) => String(c[0]).startsWith("/exam-reservations"));
     expect(reservationCalls).toHaveLength(0);
+  });
+
+  it("reveals every session returned for one city/date instead of only the first", async () => {
+    apiMock.mockResolvedValueOnce({
+      occupations: [{ id: 100, category: { id: 5, prometric_codes: [{ code: "OFFII" }] } }],
+    });
+    apiMock.mockResolvedValueOnce({
+      exam_sessions: [{ city: "Dhaka", start_date_in_browser_time_zone: "2026-07-01" }],
+    });
+    apiMock.mockResolvedValueOnce({
+      exam_sessions: [{ id: "enc-a" }, { id: "enc-b" }, { id: "enc-a" }],
+    });
+    apiMock.mockResolvedValueOnce({ id: 1 });
+    apiMock.mockResolvedValueOnce(realCentreReservationResponse("c-a", "Centre A"));
+    apiMock.mockResolvedValueOnce({ id: 2 });
+    apiMock.mockResolvedValueOnce(realCentreReservationResponse("c-b", "Centre B"));
+
+    const r = await autoRevealMissingCenters({ revealDelayMs: 0 });
+
+    expect(r.attempted).toBe(2);
+    expect(r.succeeded).toBe(2);
+    expect(setCachedMock.mock.calls.map((call) => call[0])).toEqual(["enc-a", "enc-b"]);
   });
 
   it("stops on first SVP 422 cooldown", async () => {
@@ -143,22 +164,22 @@ describe("autoRevealMissingCenters", () => {
     apiMock.mockResolvedValueOnce({
       exam_sessions: [{ city: "Chattogram", start_date_in_browser_time_zone: "2026-07-02" }],
     });
-    // First candidate: /exam-sessions OK, /temporary-seats OK, /exam-reservations → 422
+    // Expand both city/date candidates before serial reveal starts.
     apiMock.mockResolvedValueOnce({ exam_sessions: [{ id: "enc-1" }] });
+    apiMock.mockResolvedValueOnce({ exam_sessions: [{ id: "enc-2" }] });
+    // First candidate: /temporary-seats OK, /exam-reservations → 422
     apiMock.mockResolvedValueOnce({ id: 1 });
     const err422: any = new Error("Try again in 10 minutes");
     err422.status = 422;
     apiMock.mockRejectedValueOnce(err422);
 
-    const promise = autoRevealMissingCenters();
-    await vi.runAllTimersAsync();
-    const r = await promise;
+    const r = await autoRevealMissingCenters({ revealDelayMs: 0 });
     expect(r.stoppedReason).toBe("rate_limit");
     expect(r.attempted).toBe(2);
     expect(r.succeeded).toBe(0);
-    // Should have stopped before calling /exam-sessions for the 2nd category
-    const examSessionCalls = apiMock.mock.calls.filter((c) => String(c[0]).startsWith("/exam-sessions?"));
-    expect(examSessionCalls).toHaveLength(1);
+    // Should have stopped before holding/revealing the 2nd session.
+    const holdCalls = apiMock.mock.calls.filter((c) => String(c[0]).startsWith("/temporary-seats"));
+    expect(holdCalls).toHaveLength(1);
   });
 });
 
@@ -166,6 +187,10 @@ describe("_internal helpers", () => {
   it("buildCacheKey lowercases city", () => {
     expect(_internal.buildCacheKey(42, "Dhaka", "2026-07-01")).toBe("cat-42|city-dhaka|date-2026-07-01");
     expect(_internal.buildCacheKey("99", "CHATTOGRAM", "2026-08-15")).toBe("cat-99|city-chattogram|date-2026-08-15");
+  });
+
+  it("buildSessionCacheKey trims exact session ids", () => {
+    expect(_internal.buildSessionCacheKey(" enc-123 ")).toBe("enc-123");
   });
 
   it("pickFirstOccPerCategory dedupes by category id", () => {
@@ -187,12 +212,14 @@ describe("_internal helpers", () => {
         { city: "Dhaka", start_date_in_browser_time_zone: "2026-07-01" },
         { city: "Dhaka", start_date_in_browser_time_zone: "2026-07-01" }, // dup
         { city: "Chattogram", exam_date: "2026-07-02" },
+        { test_center: { test_center_city: "Sylhet" }, available_date: "2026-07-03" },
         { city: "", start_at_date: "2026-07-03" }, // empty city — skipped
       ],
     });
     expect(pairs).toEqual([
       { city: "Dhaka", date: "2026-07-01" },
       { city: "Chattogram", date: "2026-07-02" },
+      { city: "Sylhet", date: "2026-07-03" },
     ]);
   });
 
@@ -213,16 +240,15 @@ describe("autoRevealMissingCenters callbacks", () => {
         { city: "Chattogram", start_date_in_browser_time_zone: "2026-07-02" },
       ],
     });
+    apiMock.mockResolvedValueOnce({ exam_sessions: [{ id: "enc-0" }] });
+    apiMock.mockResolvedValueOnce({ exam_sessions: [{ id: "enc-1" }] });
     for (let i = 0; i < 2; i++) {
-      apiMock.mockResolvedValueOnce({ exam_sessions: [{ id: `enc-${i}` }] });
       apiMock.mockResolvedValueOnce({ id: 99999 });
       apiMock.mockResolvedValueOnce(realCentreReservationResponse(`c-${i}`, `Centre ${i}`));
     }
     const onReveal = vi.fn();
     const onComplete = vi.fn();
-    const promise = autoRevealMissingCenters({ onReveal, onComplete });
-    await vi.runAllTimersAsync();
-    const r = await promise;
+    const r = await autoRevealMissingCenters({ revealDelayMs: 0, onReveal, onComplete });
     expect(r.succeeded).toBe(2);
     expect(onReveal).toHaveBeenCalledTimes(2);
     expect(onReveal.mock.calls[0][1]).toBe(1);
@@ -244,9 +270,7 @@ describe("autoRevealMissingCenters callbacks", () => {
     apiMock.mockResolvedValueOnce(realCentreReservationResponse("c-1"));
     const onReveal = vi.fn(() => { throw new Error("ui broke"); });
     const onComplete = vi.fn(() => { throw new Error("ui broke too"); });
-    const promise = autoRevealMissingCenters({ onReveal, onComplete });
-    await vi.runAllTimersAsync();
-    const r = await promise;
+    const r = await autoRevealMissingCenters({ revealDelayMs: 0, onReveal, onComplete });
     expect(r.succeeded).toBe(1);
     expect(r.attempted).toBe(1);
     expect(onReveal).toHaveBeenCalled();

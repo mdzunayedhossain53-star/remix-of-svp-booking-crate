@@ -2,17 +2,17 @@
 //
 // Strategy (Conservative — option 1a chosen by user):
 //   1. Fetch user's accessible occupations → group by category (first occ per cat).
-//   2. For each category, fetch upcoming /available-dates entries (city, date pairs).
-//   3. For each (cat, city, date): compute composite key
-//        `cat-${categoryId}|city-${city.toLowerCase()}|date-${date}`
-//      and check the Supabase `revealed_test_centers` table.
-//   4. Filter to ONLY the cache misses, hard cap at MAX_REVEALS_PER_SESSION (15).
-//   5. For each cache miss, run the reveal flow:
+//   2. For each category, fetch upcoming /available-dates entries for all
+//      city/date pairs.
+//   3. Expand each city/date pair into all current /exam-sessions.
+//   4. Check the Supabase `revealed_test_centers` table by exact session id.
+//   5. Filter to ONLY the cache misses, hard cap at MAX_REVEALS_PER_SESSION (15).
+//   6. For each cache miss, run the reveal flow:
 //        POST /temporary-seats → POST /exam-reservations (null site_id payload)
 //      and on a real `test_center` in the response → upsert to cache.
-//   6. Serial execution with a 10-second delay between each reveal to avoid
+//   7. Serial execution with a 10-second delay between each reveal to avoid
 //      tripping SVP rate limits.
-//   7. Stops early on the first cooldown / 422 from SVP.
+//   8. Stops early on the first cooldown / 422 from SVP.
 //
 // Triggering: called once per browser session from BookingPage AFTER the
 // user already has a valid SVP token (so the api() helper attaches it).
@@ -34,6 +34,7 @@ export interface RevealCandidate {
   city: string;
   date: string;
   languageCode: string;
+  examSessionId?: string;
   cacheKey: string;
 }
 
@@ -46,6 +47,10 @@ export interface AutoRevealResult {
 
 function buildCacheKey(categoryId: string | number, city: string, date: string): string {
   return `cat-${categoryId}|city-${String(city).toLowerCase()}|date-${date}`;
+}
+
+function buildSessionCacheKey(sessionId: string | number): string {
+  return String(sessionId || "").trim();
 }
 
 async function fetchExistingCacheKeys(keys: string[]): Promise<Set<string>> {
@@ -80,8 +85,24 @@ function extractCityDatePairs(payload: any): Array<{ city: string; date: string 
   const list: Array<{ city: string; date: string }> = [];
   const seen = new Set<string>();
   for (const x of Array.isArray(arr) ? arr : []) {
-    const city = String(x?.city || x?.test_center?.city || "").trim();
-    const date = String(x?.start_date_in_browser_time_zone || x?.exam_date || x?.start_at_date || "").trim();
+    const city = String(
+      x?.city ||
+      x?.site_city ||
+      x?.site_city_name ||
+      x?.test_center_city ||
+      x?.test_center?.test_center_city ||
+      x?.test_center?.city ||
+      "",
+    ).trim();
+    const date = String(
+      x?.start_date_in_browser_time_zone ||
+      x?.exam_date ||
+      x?.available_date ||
+      x?.date ||
+      x?.start_at_date ||
+      x?.start_at ||
+      "",
+    ).trim();
     if (!city || !date) continue;
     const key = `${city}|${date}`;
     if (seen.has(key)) continue;
@@ -106,14 +127,15 @@ function extractLanguageCode(occ: any): string {
 // Throws an Error with .isCooldown=true if SVP returns 422 (per-category
 // cooldown) so the caller can short-circuit.
 export async function revealOneCandidate(c: RevealCandidate): Promise<RevealedCenter | null> {
-  // Fetch ONE exam_session id for this (cat, city, date) — SVP rotates
-  // the encrypted token on every request, so we read it fresh.
-  const sessions: any = await api(
-    `/exam-sessions?category_id=${encodeURIComponent(c.categoryId)}&city=${encodeURIComponent(c.city)}&exam_date=${encodeURIComponent(c.date)}`,
-  );
-  const list = sessions?.exam_sessions || sessions?.data || [];
-  if (!Array.isArray(list) || list.length === 0) return null;
-  const encryptedId = list[0]?.id;
+  let encryptedId = c.examSessionId;
+  if (!encryptedId) {
+    const sessions: any = await api(
+      `/exam-sessions?category_id=${encodeURIComponent(c.categoryId)}&city=${encodeURIComponent(c.city)}&exam_date=${encodeURIComponent(c.date)}`,
+    );
+    const list = sessions?.exam_sessions || sessions?.data || [];
+    if (!Array.isArray(list) || list.length === 0) return null;
+    encryptedId = list[0]?.id;
+  }
   if (!encryptedId) return null;
 
   // Hold first (informational — required by SVP business rules).
@@ -150,13 +172,14 @@ export async function revealOneCandidate(c: RevealCandidate): Promise<RevealedCe
 
   const centre = deepFindTestCenter(response);
   if (!centre) return null;
-  setCachedCenter(c.cacheKey, centre);
+  setCachedCenter(c.cacheKey || buildSessionCacheKey(encryptedId), centre);
   return centre;
 }
 
 export async function autoRevealMissingCenters(
   opts: {
     force?: boolean;
+    revealDelayMs?: number;
     onReveal?: (centre: RevealedCenter, cumulativeCount: number) => void;
     onComplete?: (result: AutoRevealResult) => void;
   } = {},
@@ -185,7 +208,7 @@ export async function autoRevealMissingCenters(
 
   // 2) For each category → fetch available dates (parallel up to 8 at a time
   //    to keep this snappy without flooding SVP).
-  const candidates: RevealCandidate[] = [];
+  const cityDateCandidates: RevealCandidate[] = [];
   const entries = Array.from(byCat.entries());
   const BATCH = 8;
   for (let i = 0; i < entries.length; i += BATCH) {
@@ -206,19 +229,50 @@ export async function autoRevealMissingCenters(
         }));
       } catch { return []; }
     }));
-    for (const arr of results) candidates.push(...arr);
+    for (const arr of results) cityDateCandidates.push(...arr);
   }
-  if (!candidates.length) return { attempted: 0, succeeded: 0, failed: 0, stoppedReason: "no_candidates" };
+  if (!cityDateCandidates.length) return { attempted: 0, succeeded: 0, failed: 0, stoppedReason: "no_candidates" };
 
-  // 3) Filter cache misses
-  const existingKeys = await fetchExistingCacheKeys(candidates.map((c) => c.cacheKey));
-  const misses = candidates.filter((c) => !existingKeys.has(c.cacheKey));
+  // 3) Expand every city/date pair into all currently available sessions.
+  // This is what makes the warmer cover all centres for a city/date instead
+  // of only revealing whichever session SVP happens to return first.
+  const sessionCandidates: RevealCandidate[] = [];
+  const SESSION_BATCH = 8;
+  for (let i = 0; i < cityDateCandidates.length; i += SESSION_BATCH) {
+    const slice = cityDateCandidates.slice(i, i + SESSION_BATCH);
+    const results = await Promise.all(slice.map(async (c) => {
+      try {
+        const sessions: any = await api(
+          `/exam-sessions?category_id=${encodeURIComponent(c.categoryId)}&city=${encodeURIComponent(c.city)}&exam_date=${encodeURIComponent(c.date)}`,
+        );
+        const list = sessions?.exam_sessions || sessions?.data || [];
+        if (!Array.isArray(list)) return [];
+        return list
+          .map((session: any) => buildSessionCacheKey(session?.id))
+          .filter(Boolean)
+          .map((examSessionId: string) => ({
+            ...c,
+            examSessionId,
+            cacheKey: buildSessionCacheKey(examSessionId),
+          }));
+      } catch { return []; }
+    }));
+    for (const arr of results) sessionCandidates.push(...arr);
+  }
+  if (!sessionCandidates.length) return { attempted: 0, succeeded: 0, failed: 0, stoppedReason: "no_candidates" };
+  const uniqueSessionCandidates = Array.from(
+    new Map(sessionCandidates.map((c) => [c.cacheKey, c])).values(),
+  );
+
+  // 4) Filter cache misses
+  const existingKeys = await fetchExistingCacheKeys(uniqueSessionCandidates.map((c) => c.cacheKey));
+  const misses = uniqueSessionCandidates.filter((c) => !existingKeys.has(c.cacheKey));
   if (!misses.length) return { attempted: 0, succeeded: 0, failed: 0, stoppedReason: "no_candidates" };
 
-  // 4) Hard cap at MAX_REVEALS_PER_SESSION
+  // 5) Hard cap at MAX_REVEALS_PER_SESSION
   const toReveal = misses.slice(0, MAX_REVEALS_PER_SESSION);
 
-  // 5) Serial reveal with delay
+  // 6) Serial reveal with delay
   let succeeded = 0;
   let failed = 0;
   let stoppedReason: AutoRevealResult["stoppedReason"] = "limit";
@@ -242,7 +296,8 @@ export async function autoRevealMissingCenters(
     }
     // Delay between calls (skip after last)
     if (i < toReveal.length - 1) {
-      await new Promise((r) => setTimeout(r, REVEAL_DELAY_MS));
+      const delayMs = opts.revealDelayMs ?? REVEAL_DELAY_MS;
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
     }
   }
 
@@ -255,6 +310,7 @@ export async function autoRevealMissingCenters(
 // supabase via vi.mock without re-implementing internals.
 export const _internal = {
   buildCacheKey,
+  buildSessionCacheKey,
   pickFirstOccPerCategory,
   extractCityDatePairs,
   extractLanguageCode,
